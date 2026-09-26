@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::time::Instant;
+use web_time::Instant;
 
 static TOTALS: Mutex<BTreeMap<&'static str, (f64, usize)>> = Mutex::new(BTreeMap::new());
 

@@ -10,7 +10,8 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, Thread};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 type Job = dyn Fn(usize, usize) + Sync;
 
@@ -313,7 +314,7 @@ mod bench {
             t.run(&|_, _| {});
         }
         let n = 100_000;
-        let s = std::time::Instant::now();
+        let s = web_time::Instant::now();
         for _ in 0..n {
             t.run(&|_, _| {});
         }
@@ -335,7 +336,7 @@ mod bench {
             })
         };
         spin();
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         spin();
         eprintln!("{} members: {:.0} ns per barrier", t.threads(), start.elapsed().as_secs_f64() / n as f64 * 1e9);
     }
@@ -354,14 +355,14 @@ mod bench_barrier {
             let b = Barrier::new(nt);
             let n = 20000;
             tm.run_n(nt, &|tid, _| b.wait(tid));
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             tm.run_n(nt, &|tid, _| {
                 for _ in 0..n {
                     b.wait(tid);
                 }
             });
             eprintln!("{nt} members: {:.0} ns per barrier", t.elapsed().as_secs_f64() / n as f64 * 1e9);
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             for _ in 0..2000 {
                 tm.run_n(nt, &|_, _| {});
             }

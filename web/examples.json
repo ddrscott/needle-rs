@@ -1,0 +1,398 @@
+[
+ {
+  "id": "game",
+  "label": "GAME_NPC",
+  "title": "Game NPC",
+  "blurb": "A dungeon crawler hero that takes plain-English commands. Games are one of the real-time loops TypeSafe pitches Jev for.",
+  "system": "",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "move",
+     "description": "Walk the hero in a direction.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "direction": {
+        "type": "string",
+        "enum": [
+         "north",
+         "south",
+         "east",
+         "west"
+        ]
+       },
+       "steps": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+       }
+      },
+      "required": [
+       "direction"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "attack",
+     "description": "Attack an enemy with a weapon.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "target": {
+        "type": "string",
+        "enum": [
+         "goblin",
+         "skeleton",
+         "dragon"
+        ]
+       },
+       "weapon": {
+        "type": "string",
+        "enum": [
+         "sword",
+         "bow",
+         "fireball"
+        ]
+       }
+      },
+      "required": [
+       "target"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "use_item",
+     "description": "Use an item from the pack.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "item": {
+        "type": "string",
+        "enum": [
+         "health_potion",
+         "torch",
+         "key",
+         "rope"
+        ]
+       }
+      },
+      "required": [
+       "item"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "speak",
+     "description": "Say a line to a character.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "line": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "line"
+      ]
+     }
+    }
+   }
+  ],
+  "queries": [
+   "take two steps east",
+   "hit the goblin with my sword",
+   "drink a health potion, I'm almost dead",
+   "light a torch, it's dark in here",
+   "shoot the skeleton with an arrow",
+   "tell the innkeeper we need a room for the night"
+  ]
+ },
+ {
+  "id": "robot",
+  "label": "ROBOT_ARM",
+  "title": "Robot arm",
+  "blurb": "A pick-and-place arm on a factory line. Every command becomes a typed call the controller can check before it moves.",
+  "system": "",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "pick",
+     "description": "Pick up an object with the gripper.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "object": {
+        "type": "string",
+        "enum": [
+         "box",
+         "bottle",
+         "cup",
+         "bolt"
+        ]
+       },
+       "color": {
+        "type": "string",
+        "enum": [
+         "red",
+         "green",
+         "blue",
+         "yellow"
+        ]
+       }
+      },
+      "required": [
+       "object"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "drop_in_bin",
+     "description": "Release the held object into one of the bins.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "bin": {
+        "type": "string",
+        "enum": [
+         "left",
+         "right",
+         "center"
+        ]
+       }
+      },
+      "required": [
+       "bin"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "set_speed",
+     "description": "Change how fast the arm moves.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "speed": {
+        "type": "string",
+        "enum": [
+         "slow",
+         "normal",
+         "fast"
+        ]
+       }
+      },
+      "required": [
+       "speed"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "stop",
+     "description": "Stop the arm immediately.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "reason": {
+        "type": "string"
+       }
+      },
+      "required": []
+     }
+    }
+   }
+  ],
+  "queries": [
+   "grab the red cup",
+   "pick up the blue bottle",
+   "drop it in the left bin",
+   "slow down a bit",
+   "switch to fast mode",
+   "stop! someone just walked into the cell"
+  ]
+ },
+ {
+  "id": "car",
+  "label": "CAR_CABIN",
+  "title": "Car cabin",
+  "blurb": "A voice assistant in the dashboard, where a round trip to the cloud is a round trip too many.",
+  "system": "",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "set_temperature",
+     "description": "Set the cabin temperature.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "zone": {
+        "type": "string",
+        "enum": [
+         "driver",
+         "passenger",
+         "all"
+        ]
+       },
+       "degrees": {
+        "type": "integer",
+        "minimum": 16,
+        "maximum": 30
+       }
+      },
+      "required": [
+       "degrees"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "navigate",
+     "description": "Start navigation to a place.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "destination": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "destination"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "play_music",
+     "description": "Play music.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "source": {
+        "type": "string",
+        "enum": [
+         "radio",
+         "spotify",
+         "podcast"
+        ]
+       },
+       "query": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "source"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "call",
+     "description": "Phone a contact.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "contact": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "contact"
+      ]
+     }
+    }
+   }
+  ],
+  "queries": [
+   "take me to the nearest gas station",
+   "set the passenger side to 20 degrees",
+   "make the driver side 21 degrees",
+   "it's freezing, bump everyone to 25",
+   "play some jazz on spotify",
+   "call mom"
+  ]
+ },
+ {
+  "id": "expense",
+  "label": "EXPENSES",
+  "title": "Expense capture",
+  "blurb": "Turn a note or a receipt line into a typed record: amount, currency and category, ready for the ledger.",
+  "system": "",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "log_expense",
+     "description": "Record an expense from a receipt or note.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "amount": {
+        "type": "number"
+       },
+       "currency": {
+        "type": "string",
+        "enum": [
+         "USD",
+         "EUR",
+         "GBP",
+         "JPY"
+        ]
+       },
+       "category": {
+        "type": "string",
+        "enum": [
+         "food",
+         "travel",
+         "lodging",
+         "office",
+         "other"
+        ]
+       },
+       "merchant": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "amount",
+       "currency"
+      ]
+     }
+    }
+   }
+  ],
+  "queries": [
+   "lunch at Chipotle was 14.50 dollars",
+   "Uber to the airport, 38 USD",
+   "ramen in Tokyo for 1200 yen",
+   "paid 120 euros for the hotel in Berlin",
+   "printer paper from Staples, 23.99 dollars",
+   "coffee with a client, 6 pounds"
+  ]
+ }
+]

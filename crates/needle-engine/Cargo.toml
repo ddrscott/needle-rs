@@ -15,6 +15,16 @@ half.workspace = true
 rayon.workspace = true
 fancy-regex.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# `Instant` that works in a browser (it is `std`'s everywhere else).
+web-time.workspace = true
+
+# Apple's libm is the engine's; elsewhere the musl port stands in (results
+# can differ in the last bit, so parity is claimed on macOS only).
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+libm.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 matrixmultiply = { version = "0.3", features = ["threading"] }

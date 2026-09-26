@@ -37,31 +37,299 @@ pub const NEG: f32 = f32::from_bits(0xf149f2ca);
 /// The engine's team size, which fixes decode attention's key chunking.
 const NATIVE_TEAM: usize = 4;
 
-#[repr(C)]
-struct SinCos {
-    sin: f32,
-    cos: f32,
+/// The system libm the engine links against (Apple's).
+#[cfg(target_vendor = "apple")]
+mod sys {
+    #[repr(C)]
+    struct SinCos {
+        sin: f32,
+        cos: f32,
+    }
+
+    unsafe extern "C" {
+        fn expf(x: f32) -> f32;
+        fn exp(x: f64) -> f64;
+        fn powf(x: f32, y: f32) -> f32;
+        fn __sincosf_stret(x: f32) -> SinCos;
+    }
+
+    // SAFETY (all four): pure libm functions.
+    #[inline]
+    pub fn lexpf(x: f32) -> f32 {
+        unsafe { expf(x) }
+    }
+    #[inline]
+    pub fn lexp(x: f64) -> f64 {
+        unsafe { exp(x) }
+    }
+    #[inline]
+    pub fn lpowf(x: f32, y: f32) -> f32 {
+        unsafe { powf(x, y) }
+    }
+    #[inline]
+    pub fn sincosf(x: f32) -> (f32, f32) {
+        let r = unsafe { __sincosf_stret(x) };
+        (r.sin, r.cos)
+    }
 }
 
-unsafe extern "C" {
-    fn expf(x: f32) -> f32;
-    fn exp(x: f64) -> f64;
-    fn powf(x: f32, y: f32) -> f32;
-    fn __sincosf_stret(x: f32) -> SinCos;
+/// The musl port, for targets without Apple's libm (the browser among
+/// them). A result can differ from Apple's in the last bit.
+#[cfg(not(target_vendor = "apple"))]
+mod sys {
+    #[inline]
+    pub fn lexpf(x: f32) -> f32 {
+        libm::expf(x)
+    }
+    #[inline]
+    pub fn lexp(x: f64) -> f64 {
+        libm::exp(x)
+    }
+    #[inline]
+    pub fn lpowf(x: f32, y: f32) -> f32 {
+        libm::powf(x, y)
+    }
+    #[inline]
+    pub fn sincosf(x: f32) -> (f32, f32) {
+        libm::sincosf(x)
+    }
 }
 
 /// libm `expf` (the engine's scalar exp).
-#[inline]
-fn lexpf(x: f32) -> f32 {
-    // SAFETY: a pure libm function.
-    unsafe { expf(x) }
+use sys::lexpf;
+use sys::{lexp, lpowf, sincosf};
+
+/// WebAssembly SIMD helpers. Wasm has no fused multiply-add, and the engine's
+/// arithmetic is fma throughout, so [`wsimd::fma4`] computes it exactly: an
+/// f32 product is exact in f64, the f64 sum rounds once, and narrowing to
+/// f32 rounds again, which differs from a single rounding only when the f64
+/// sum sits exactly on an f32 midpoint (or narrows to an f32 subnormal).
+/// Those lanes, a few in a billion, redo the fma in software.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub mod wsimd {
+    use std::arch::wasm32::*;
+
+    #[inline(always)]
+    pub fn splat(x: f32) -> v128 {
+        f32x4_splat(x)
+    }
+
+    /// # Safety
+    /// Four floats readable at `p`.
+    #[inline(always)]
+    pub unsafe fn load(p: *const f32) -> v128 {
+        unsafe { v128_load(p.cast()) }
+    }
+
+    /// # Safety
+    /// Four floats writable at `p`.
+    #[inline(always)]
+    pub unsafe fn store(p: *mut f32, v: v128) {
+        unsafe { v128_store(p.cast(), v) }
+    }
+
+    /// Four f16 bit patterns (finite) widened exactly: the magnitude bits
+    /// moved into f32 position and scaled by 2^112, which also covers
+    /// subnormals.
+    /// # Safety
+    /// Four halves readable at `p`.
+    #[inline(always)]
+    pub unsafe fn load_f16(p: *const u16) -> v128 {
+        unsafe {
+            let h = u32x4_extend_low_u16x8(v128_load64_zero(p.cast()));
+            let sign = i32x4_shl(v128_and(h, u32x4_splat(0x8000)), 16);
+            let mag = f32x4_mul(i32x4_shl(v128_and(h, u32x4_splat(0x7fff)), 13), f32x4_splat(f32::from_bits(0x7780_0000)));
+            v128_or(mag, sign)
+        }
+    }
+
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    #[inline(always)]
+    fn needs_software(r: v128) -> bool {
+        let half = i64x2_eq(v128_and(r, i64x2_splat(0x1fff_ffff)), i64x2_splat(0x1000_0000));
+        let e = u64x2_shr(v128_and(r, i64x2_splat(0x7ff0_0000_0000_0000)), 52);
+        // f32 subnormal range, less f64 zero and subnormals (which narrow
+        // to the same zero either way).
+        let tiny = v128_and(i64x2_lt(e, i64x2_splat(1023 - 126)), i64x2_gt(e, i64x2_splat(0)));
+        v128_any_true(v128_or(half, tiny))
+    }
+
+    /// `fma(a, b, c)` on four lanes, correctly rounded: the hardware's
+    /// fused multiply-add. The page loads this build only after
+    /// [`madd_is_fused`] says the browser really fuses it.
+    #[cfg(target_feature = "relaxed-simd")]
+    #[inline(always)]
+    pub fn fma4(a: v128, b: v128, c: v128) -> v128 {
+        f32x4_relaxed_madd(a, b, c)
+    }
+
+    /// Whether `relaxed_madd` rounds once: a sum that sits just under an
+    /// f32 midpoint comes out right only when the product is not rounded
+    /// first.
+    #[cfg(target_feature = "relaxed-simd")]
+    pub fn madd_is_fused() -> bool {
+        let (a, b, c) = (f32::from_bits(0x3f80_0001), f32::from_bits(0x337f_fffe), f32::from_bits(0x3f80_0001));
+        let got = f32x4_extract_lane::<0>(f32x4_relaxed_madd(f32x4_splat(a), f32x4_splat(b), f32x4_splat(c)));
+        // `black_box` keeps the check from being folded at compile time.
+        got.to_bits() == std::hint::black_box(a).mul_add(std::hint::black_box(b), std::hint::black_box(c)).to_bits()
+    }
+
+    /// `fma(a, b, c)` on four lanes, correctly rounded.
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    #[inline(always)]
+    pub fn fma4(a: v128, b: v128, c: v128) -> v128 {
+        let hi = |v: v128| i32x4_shuffle::<2, 3, 0, 1>(v, v);
+        let lo_r = f64x2_add(f64x2_mul(f64x2_promote_low_f32x4(a), f64x2_promote_low_f32x4(b)), f64x2_promote_low_f32x4(c));
+        let hi_r = f64x2_add(f64x2_mul(f64x2_promote_low_f32x4(hi(a)), f64x2_promote_low_f32x4(hi(b))), f64x2_promote_low_f32x4(hi(c)));
+        if needs_software(lo_r) || needs_software(hi_r) {
+            return slow(a, b, c);
+        }
+        i32x4_shuffle::<0, 1, 4, 5>(f32x4_demote_f64x2_zero(lo_r), f32x4_demote_f64x2_zero(hi_r))
+    }
+
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    #[cold]
+    #[inline(never)]
+    fn slow(a: v128, b: v128, c: v128) -> v128 {
+        let (a, b, c) = (lanes(a), lanes(b), lanes(c));
+        f32x4(a[0].mul_add(b[0], c[0]), a[1].mul_add(b[1], c[1]), a[2].mul_add(b[2], c[2]), a[3].mul_add(b[3], c[3]))
+    }
+
+    #[inline(always)]
+    pub fn lanes(v: v128) -> [f32; 4] {
+        [f32x4_extract_lane::<0>(v), f32x4_extract_lane::<1>(v), f32x4_extract_lane::<2>(v), f32x4_extract_lane::<3>(v)]
+    }
+
+    /// Round half away from zero (NEON's `fcvtas`, `f32::round`): the
+    /// fraction `x - trunc(x)` is exact, and a half or more steps out.
+    #[inline(always)]
+    pub fn round_away(x: v128) -> v128 {
+        let t = f32x4_trunc(x);
+        // `+-1` where the fraction is a half or more, else a zero of `x`'s
+        // sign (so `-0.3` stays `-0.0`).
+        let sign = v128_and(x, u32x4_splat(0x8000_0000));
+        let step = v128_or(sign, v128_and(f32x4_ge(f32x4_abs(f32x4_sub(x, t)), f32x4_splat(0.5)), f32x4_splat(1.0)));
+        f32x4_add(t, step)
+    }
+
+    /// [`super::nexp`] on four lanes (NEON's `nexp4`).
+    #[inline(always)]
+    pub fn nexp4(x: v128) -> v128 {
+        let c = |b: u32| f32x4_splat(f32::from_bits(b));
+        let x = f32x4_min(f32x4_max(x, c(0xc2b0c0a5)), c(0x42b0c0a5));
+        let k = f32x4_nearest(f32x4_mul(x, c(0x3fb8aa3b)));
+        let r = fma4(k, c(0xbf318000), x);
+        let r = fma4(k, c(0x395e8083), r);
+        let mut p = fma4(c(0x39506967), r, c(0x3ab743ce));
+        p = fma4(r, p, c(0x3c088908));
+        p = fma4(r, p, c(0x3d2aa9c1));
+        p = fma4(r, p, c(0x3e2aaaaa));
+        p = fma4(r, p, f32x4_splat(0.5));
+        let y = fma4(f32x4_mul(r, r), p, r);
+        let s = i32x4_add(i32x4_shl(i32x4_trunc_sat_f32x4(k), 23), i32x4_splat(0x3f80_0000));
+        fma4(s, y, s)
+    }
 }
 
-#[inline]
-fn sincosf(x: f32) -> (f32, f32) {
-    // SAFETY: a pure libm function.
-    let r = unsafe { __sincosf_stret(x) };
-    (r.sin, r.cos)
+/// Check the wasm SIMD helpers against their scalar definitions (run from
+/// the browser build; returns a report).
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[doc(hidden)]
+pub fn wasm_simd_selftest(n: usize) -> String {
+    use std::arch::wasm32::*;
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    // Random f32s with exponents spread over most of the range.
+    let mut rnd = |spread: u32| {
+        let r = next();
+        let exp = 127u32.wrapping_add((r as u32 % (2 * spread + 1)).wrapping_sub(spread)) & 0xff;
+        f32::from_bits(((r >> 32) as u32 & 0x807f_ffff) | (exp.clamp(1, 254) << 23))
+    };
+    let (mut bad_fma, mut slow_hits) = (0usize, 0usize);
+    for i in 0..n {
+        let spread = [3, 20, 60, 126][i % 4];
+        let (a, b, c) = (
+            [rnd(spread), rnd(spread), rnd(spread), rnd(spread)],
+            [rnd(spread), rnd(spread), rnd(spread), rnd(spread)],
+            [rnd(spread), rnd(spread), rnd(spread), rnd(spread)],
+        );
+        let v = wsimd::fma4(f32x4(a[0], a[1], a[2], a[3]), f32x4(b[0], b[1], b[2], b[3]), f32x4(c[0], c[1], c[2], c[3]));
+        for (k, got) in wsimd::lanes(v).into_iter().enumerate() {
+            let want = a[k].mul_add(b[k], c[k]);
+            if got.to_bits() != want.to_bits() && !(got.is_nan() && want.is_nan()) {
+                bad_fma += 1;
+            }
+        }
+    }
+    // Midpoints: `a * b` exact in f32 terms plus a `c` that lands the f64
+    // sum on a halfway point, then nudged by a tiny opposite term.
+    for i in 0..n.min(1 << 20) {
+        // `(1 + 2^-23) * 2^-24 (1 - 2^-23) = 2^-24 - 2^-70`: added to an odd
+        // `c` the exact sum sits just under a midpoint, and the f64 sum on it.
+        let a = f32::from_bits(0x3f80_0001);
+        let b = f32::from_bits(0x337f_fffe);
+        let c = f32::from_bits(0x3f80_0001 | ((i as u32 & 0x003f_ffff) << 1));
+        let (b, c) = if i % 2 == 0 { (b, c) } else { (-b, -c) };
+        let v = wsimd::fma4(f32x4_splat(a), f32x4_splat(b), f32x4_splat(c));
+        let want = a.mul_add(b, c);
+        if wsimd::lanes(v)[0].to_bits() != want.to_bits() {
+            bad_fma += 1;
+        }
+        let lo = f64::from(a) * f64::from(b) + f64::from(c);
+        if (lo.to_bits() & 0x1fff_ffff) == 0x1000_0000 {
+            slow_hits += 1;
+        }
+    }
+    let mut bad_f16 = 0usize;
+    for h in 0..=u16::MAX {
+        let x = half::f16::from_bits(h);
+        if !x.is_finite() {
+            continue;
+        }
+        // SAFETY: four halves on the stack.
+        let v = unsafe { wsimd::load_f16([h, h, h, h].as_ptr()) };
+        if wsimd::lanes(v)[0].to_bits() != x.to_f32().to_bits() {
+            bad_f16 += 1;
+        }
+    }
+    let mut bad_exp = 0usize;
+    for i in 0..n {
+        let x = (i as f32 / n as f32) * 200.0 - 100.0 + f32::from_bits(next() as u32 & 0x3fff_ffff) * 1e-6;
+        if wsimd::lanes(wsimd::nexp4(f32x4_splat(x)))[0].to_bits() != nexp(x).to_bits() {
+            bad_exp += 1;
+        }
+    }
+    let mut bad_round = 0usize;
+    for i in 0..n {
+        let x = match i % 3 {
+            0 => (i as f32 - n as f32 / 2.0) * 0.5,
+            1 => f32::from_bits(next() as u32 & 0xcfff_ffff),
+            _ => (next() as u32 as f32 / u32::MAX as f32 - 0.5) * 4.0e6,
+        };
+        if wsimd::lanes(wsimd::round_away(f32x4_splat(x)))[0].to_bits() != x.round().to_bits() && !x.is_nan() {
+            bad_round += 1;
+        }
+    }
+    let mut bad_idot = 0usize;
+    for len in [16usize, 48, 128, 37] {
+        for _ in 0..(n / 64).max(1) {
+            let a: Vec<i8> = (0..len).map(|_| next() as i8).collect();
+            let b: Vec<i8> = (0..len).map(|_| next() as i8).collect();
+            let want: i32 = a.iter().zip(&b).map(|(&x, &y)| x as i32 * y as i32).sum();
+            if idot(&a, &b) != want {
+                bad_idot += 1;
+            }
+        }
+    }
+    format!(
+        "fma4 mismatches {bad_fma} of {} (midpoint lanes seen {slow_hits}); f16 mismatches {bad_f16}; nexp4 mismatches {bad_exp} of {n}; round mismatches {bad_round}; idot mismatches {bad_idot}",
+        n * 4 + n.min(1 << 20)
+    )
 }
 
 /// The engine's inline vector exp: clamp, `k = rint(x log2 e)`, a two-part
@@ -103,7 +371,21 @@ fn dot16(x: &[f32], y: &[f32]) -> f32 {
         let p = vpaddq_f32(t, t);
         vgetq_lane_f32(p, 0) + vgetq_lane_f32(p, 1)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: loads stay inside the slices (whole 16-element chunks).
+    unsafe {
+        use std::arch::wasm32::*;
+        let mut a = [f32x4_splat(0.0); 4];
+        for c in 0..x.len() / 16 {
+            for (j, aj) in a.iter_mut().enumerate() {
+                let i = c * 16 + j * 4;
+                *aj = wsimd::fma4(wsimd::load(x.as_ptr().add(i)), wsimd::load(y.as_ptr().add(i)), *aj);
+            }
+        }
+        let t = wsimd::lanes(f32x4_add(f32x4_add(f32x4_add(a[2], a[3]), a[1]), a[0]));
+        (t[0] + t[1]) + (t[2] + t[3])
+    }
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     {
         let mut a = [[0f32; 4]; 4];
         for c in 0..x.len() / 16 {
@@ -128,6 +410,17 @@ fn rinv(ss: f32, n: usize) -> f32 {
 /// Zero-centered RMSNorm: `t = x * r`, `out = fma(t, s, t)`.
 fn zcn(x: &[f32], s: &[f32], out: &mut [f32]) {
     let r = rinv(dot16(x, x), x.len());
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len().is_multiple_of(4) {
+        // SAFETY: whole 4-element blocks of equal-length slices.
+        unsafe {
+            for i in (0..x.len()).step_by(4) {
+                let t = std::arch::wasm32::f32x4_mul(wsimd::load(x.as_ptr().add(i)), wsimd::splat(r));
+                wsimd::store(out.as_mut_ptr().add(i), wsimd::fma4(t, wsimd::load(s.as_ptr().add(i)), t));
+            }
+        }
+        return;
+    }
     for ((o, &v), &s) in out.iter_mut().zip(x).zip(s) {
         let t = v * r;
         *o = t.mul_add(s, t);
@@ -146,6 +439,17 @@ fn zcn_inplace(x: &mut [f32], s: &[f32]) {
 /// [`zcn`] with the scale as the archive stores it (f16, widened per use).
 fn zcn16(x: &[f32], s: &[f16], out: &mut [f32]) {
     let r = rinv(dot16(x, x), x.len());
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len().is_multiple_of(4) {
+        // SAFETY: whole 4-element blocks of equal-length slices.
+        unsafe {
+            for i in (0..x.len()).step_by(4) {
+                let t = std::arch::wasm32::f32x4_mul(wsimd::load(x.as_ptr().add(i)), wsimd::splat(r));
+                wsimd::store(out.as_mut_ptr().add(i), wsimd::fma4(t, wsimd::load_f16(s.as_ptr().add(i).cast()), t));
+            }
+        }
+        return;
+    }
     for ((o, &v), &s) in out.iter_mut().zip(x).zip(s) {
         let t = v * r;
         *o = t.mul_add(s.to_f32(), t);
@@ -155,6 +459,17 @@ fn zcn16(x: &[f32], s: &[f16], out: &mut [f32]) {
 /// [`zcn16`] in place.
 fn zcn16_inplace(x: &mut [f32], s: &[f16]) {
     let r = rinv(dot16(x, x), x.len());
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len().is_multiple_of(4) {
+        // SAFETY: whole 4-element blocks of equal-length slices.
+        unsafe {
+            for i in (0..x.len()).step_by(4) {
+                let t = std::arch::wasm32::f32x4_mul(wsimd::load(x.as_ptr().add(i)), wsimd::splat(r));
+                wsimd::store(x.as_mut_ptr().add(i), wsimd::fma4(t, wsimd::load_f16(s.as_ptr().add(i).cast()), t));
+            }
+        }
+        return;
+    }
     for (v, &s) in x.iter_mut().zip(s) {
         let t = *v * r;
         *v = t.mul_add(s.to_f32(), t);
@@ -179,7 +494,19 @@ fn axpy16(acc: &mut [f32], u: &[f16], w: f32) {
             acc[i] = u[i].to_f32().mul_add(w, acc[i]);
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks, then a scalar tail.
+    unsafe {
+        let n = acc.len() / 4 * 4;
+        for i in (0..n).step_by(4) {
+            let a = wsimd::load(acc.as_ptr().add(i));
+            wsimd::store(acc.as_mut_ptr().add(i), wsimd::fma4(wsimd::load_f16(u.as_ptr().add(i).cast()), wsimd::splat(w), a));
+        }
+        for i in n..acc.len() {
+            acc[i] = u[i].to_f32().mul_add(w, acc[i]);
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     for (a, &u) in acc.iter_mut().zip(u) {
         *a = u.to_f32().mul_add(w, *a);
     }
@@ -194,6 +521,10 @@ pub(crate) trait Src: Sync {
     /// Elements `i..i + 4` exist.
     #[cfg(target_arch = "aarch64")]
     unsafe fn load4(&self, i: usize) -> std::arch::aarch64::float32x4_t;
+    /// # Safety
+    /// Elements `i..i + 4` exist.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe fn load4w(&self, i: usize) -> std::arch::wasm32::v128;
 }
 
 impl Src for [f32] {
@@ -205,6 +536,11 @@ impl Src for [f32] {
     #[inline(always)]
     unsafe fn load4(&self, i: usize) -> std::arch::aarch64::float32x4_t {
         unsafe { std::arch::aarch64::vld1q_f32(self.as_ptr().add(i)) }
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline(always)]
+    unsafe fn load4w(&self, i: usize) -> std::arch::wasm32::v128 {
+        unsafe { wsimd::load(self.as_ptr().add(i)) }
     }
 }
 
@@ -221,6 +557,11 @@ impl Src for [f16] {
             vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(self.as_ptr().add(i).cast())))
         }
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline(always)]
+    unsafe fn load4w(&self, i: usize) -> std::arch::wasm32::v128 {
+        unsafe { wsimd::load_f16(self.as_ptr().add(i).cast()) }
+    }
 }
 
 /// Integer dot of two int8 rows.
@@ -232,6 +573,27 @@ fn idot(a: &[i8], b: &[i8]) -> i32 {
         // SAFETY: dotprod detected; loads stay inside the slices.
         return unsafe { neon::idot(a, b) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        use std::arch::wasm32::*;
+        let n = a.len() / 16 * 16;
+        let mut acc = i32x4_splat(0);
+        // SAFETY: whole 16-byte blocks inside both slices.
+        unsafe {
+            for i in (0..n).step_by(16) {
+                let (x, y) = (v128_load(a.as_ptr().add(i).cast()), v128_load(b.as_ptr().add(i).cast()));
+                acc = i32x4_add(acc, i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(x, y)));
+                acc = i32x4_add(acc, i32x4_extadd_pairwise_i16x8(i16x8_extmul_high_i8x16(x, y)));
+            }
+        }
+        let tail: i32 = a[n..].iter().zip(&b[n..]).map(|(&x, &y)| x as i32 * y as i32).sum();
+        return i32x4_extract_lane::<0>(acc)
+            + i32x4_extract_lane::<1>(acc)
+            + i32x4_extract_lane::<2>(acc)
+            + i32x4_extract_lane::<3>(acc)
+            + tail;
+    }
+    #[allow(unreachable_code)]
     a.iter().zip(b).map(|(&x, &y)| x as i32 * y as i32).sum()
 }
 
@@ -380,7 +742,7 @@ impl Tables {
         let coef = -2.0f32 / qk as f32;
         let theta = c.rope_theta as f32;
         // SAFETY: a pure libm function.
-        let freq: Vec<f32> = (0..qk / 2).map(|i| unsafe { powf(theta, i as f32 * coef) }).collect();
+        let freq: Vec<f32> = (0..qk / 2).map(|i| lpowf(theta, i as f32 * coef)).collect();
         let (sd, cd) = freq.iter().map(|&f| sincosf(f)).unzip();
         let ncols = 2 * c.mhc_lanes + c.mhc_lanes * c.mhc_lanes;
         let phi = model.q.as_ref().map_or(vec![], |q| q.phi_f32.iter().map(|w| Phi8::new(w, ncols)).collect());
@@ -1105,7 +1467,23 @@ fn cond_weights(h2: &[f32], cond_v: &[f16]) -> [f32; 8] {
             vst1q_f32(o.as_mut_ptr().add(4), hi);
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: `cond_v` holds 8 per element of `h2`.
+    unsafe {
+        use std::arch::wasm32::*;
+        let mut v = [f32x4_splat(0.0); 8];
+        for (j, &hv) in h2.iter().enumerate() {
+            let set = (j % 4) * 2;
+            let h = f32x4_splat(hv);
+            v[set] = wsimd::fma4(h, cond_v.load4w(j * 8), v[set]);
+            v[set + 1] = wsimd::fma4(h, cond_v.load4w(j * 8 + 4), v[set + 1]);
+        }
+        for (k, a) in acc.iter_mut().enumerate() {
+            a[..4].copy_from_slice(&wsimd::lanes(v[2 * k]));
+            a[4..].copy_from_slice(&wsimd::lanes(v[2 * k + 1]));
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     for (j, &hv) in h2.iter().enumerate() {
         let a = &mut acc[j % 4];
         for (k, ak) in a.iter_mut().enumerate() {
@@ -1432,6 +1810,7 @@ fn attend_head_ref(
 
 /// Runs of consecutive slots covering `keys` in order: `(first key index,
 /// first slot, length)`.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 fn slot_runs(keys: &Keys, attend: Option<(usize, usize)>, runs: &mut Vec<(usize, usize, usize)>) {
     runs.clear();
     let mut idx = 0;
@@ -1494,8 +1873,11 @@ pub(crate) type Part = (f32, f32, [f32; 64]);
 fn fast_attention(qk: usize, vd: usize) -> bool {
     #[cfg(target_arch = "aarch64")]
     return qk == 48 && vd <= 64 && vd.is_multiple_of(4) && std::arch::is_aarch64_feature_detected!("dotprod");
-    #[allow(unreachable_code)]
-    false
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = (qk, vd);
+        false
+    }
 }
 
 /// The engine's key chunking for `n` keys: how many chunks, and their size
@@ -1530,15 +1912,16 @@ fn attend_chunk(
     if ci >= key_chunks(n, nested, nkv).0 {
         return None;
     }
-    let mut part = [(0f32, 0f32, [0f32; 64])];
     #[cfg(target_arch = "aarch64")]
     if fast_attention(qk, vd) {
+        let mut part = [(0f32, 0f32, [0f32; 64])];
         // SAFETY: as in `attend_head_fast`.
         ATTN.with_borrow_mut(|sc| unsafe { neon::attend_parts(sc, ls, qh, kvh, nkv, vd, keys, attend, nested, ci..ci + 1, &mut part) });
         return Some(part[0]);
     }
-    let _ = (ls, qh, kvh, qk, attend);
-    unimplemented!("chunked attention without NEON")
+    // Callers split heads by chunk only when `fast_attention` holds.
+    let _ = (ls, qh, kvh, qk, vd, attend);
+    unreachable!("chunked attention runs on the NEON path only")
 }
 
 /// Combine a head's chunk parts: one chunk normalises by its sum; several
@@ -1592,6 +1975,24 @@ fn digits21(w: &[f32], qw: f32, hi: &mut [i8], mid: &mut [i8], lo: &mut [i8]) {
             i += 4;
         }
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: loads and stores stay in bounds (whole 4-element blocks).
+    unsafe {
+        use std::arch::wasm32::*;
+        let qv = f32x4_splat(qw);
+        let m7 = i32x4_splat(127);
+        while i + 4 <= w.len() {
+            let q = i32x4_trunc_sat_f32x4(wsimd::round_away(f32x4_mul(wsimd::load(w.as_ptr().add(i)), qv)));
+            let lanes = [i32x4_shr(q, 14), v128_and(i32x4_shr(q, 7), m7), v128_and(q, m7)];
+            for (dst, v) in [hi.as_mut_ptr(), mid.as_mut_ptr(), lo.as_mut_ptr()].into_iter().zip(lanes) {
+                *dst.add(i) = i32x4_extract_lane::<0>(v) as i8;
+                *dst.add(i + 1) = i32x4_extract_lane::<1>(v) as i8;
+                *dst.add(i + 2) = i32x4_extract_lane::<2>(v) as i8;
+                *dst.add(i + 3) = i32x4_extract_lane::<3>(v) as i8;
+            }
+            i += 4;
+        }
+    }
     while i < w.len() {
         let wq = (w[i] * qw).round() as i32;
         hi[i] = (wq >> 14) as i8;
@@ -1634,7 +2035,32 @@ fn chunk_exp(s: &mut [f32], m: f32) -> f32 {
         let q = vpaddq_f32(t, t);
         sum = vgetq_lane_f32(q, 0) + vgetq_lane_f32(q, 1);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: every block stays inside `s`.
+    unsafe {
+        use std::arch::wasm32::*;
+        let mv = f32x4_splat(m);
+        let (mut a, mut b) = (f32x4_splat(0.0), f32x4_splat(0.0));
+        let p = s.as_mut_ptr();
+        while i + 8 <= l {
+            let e0 = wsimd::nexp4(f32x4_sub(wsimd::load(p.add(i)), mv));
+            let e1 = wsimd::nexp4(f32x4_sub(wsimd::load(p.add(i + 4)), mv));
+            wsimd::store(p.add(i), e0);
+            wsimd::store(p.add(i + 4), e1);
+            a = f32x4_add(a, e0);
+            b = f32x4_add(b, e1);
+            i += 8;
+        }
+        while i + 4 <= l {
+            let e0 = wsimd::nexp4(f32x4_sub(wsimd::load(p.add(i)), mv));
+            wsimd::store(p.add(i), e0);
+            a = f32x4_add(a, e0);
+            i += 4;
+        }
+        let t = wsimd::lanes(f32x4_add(a, b));
+        sum = (t[0] + t[1]) + (t[2] + t[3]);
+    }
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     {
         let mut a = [0f32; 4];
         let mut b = [0f32; 4];
@@ -1774,7 +2200,32 @@ unsafe fn mix8<const TRANSPOSE: bool, C: Src + ?Sized, R: Src + ?Sized>(
             }
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: every access is inside the 32x32 blocks, and the caller owns
+    // the tiles written.
+    unsafe {
+        use std::arch::wasm32::*;
+        for t in tiles {
+            let (r0, c0) = ((t / 4) * 8, (t % 4) * 8);
+            for r in r0..r0 + 8 {
+                let (mut o0, mut o1) = (f32x4_splat(0.0), f32x4_splat(0.0));
+                for j in 0..NB {
+                    let c = f32x4_splat(ct.at(j * NB + r));
+                    o0 = wsimd::fma4(c, rows.load4w(j * NB + c0), o0);
+                    o1 = wsimd::fma4(c, rows.load4w(j * NB + c0 + 4), o1);
+                }
+                if TRANSPOSE {
+                    for (k, v) in wsimd::lanes(o0).into_iter().chain(wsimd::lanes(o1)).enumerate() {
+                        *out.ptr().add((c0 + k) * NB + r) = v;
+                    }
+                } else {
+                    wsimd::store(out.ptr().add(r * NB + c0), o0);
+                    wsimd::store(out.ptr().add(r * NB + c0 + 4), o1);
+                }
+            }
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     for t in tiles {
         let (r0, c0) = ((t / 4) * 8, (t % 4) * 8);
         for r in r0..r0 + 8 {
@@ -1810,7 +2261,21 @@ fn silu_native(z: &mut [f32]) {
             *v /= nexp(-*v) + 1.0;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: loads and stores stay in `z`.
+    unsafe {
+        use std::arch::wasm32::*;
+        let (head, tail) = z.as_chunks_mut::<4>();
+        for c in head {
+            let v = wsimd::load(c.as_ptr());
+            let e = wsimd::nexp4(f32x4_neg(v));
+            wsimd::store(c.as_mut_ptr(), f32x4_div(v, f32x4_add(e, f32x4_splat(1.0))));
+        }
+        for v in tail {
+            *v /= nexp(-*v) + 1.0;
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     for v in z {
         *v /= nexp(-*v) + 1.0;
     }
@@ -1825,7 +2290,7 @@ fn sinkhorn64(z: &[f32; 16]) -> [f32; 16] {
         let m = z[r * 4].max(z[r * 4 + 1]).max(z[r * 4 + 2].max(z[r * 4 + 3])) as f64;
         for c in 0..4 {
             // SAFETY: a pure libm function.
-            e[r * 4 + c] = unsafe { exp(z[r * 4 + c] as f64 - m) };
+            e[r * 4 + c] = lexp(z[r * 4 + c] as f64 - m);
         }
     }
     for _ in 0..20 {
@@ -2230,7 +2695,7 @@ mod bench {
         let mut out = vec![0f32; vd];
         for name in ["full"] {
             let reps = std::env::var("NX_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20000);
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             for _ in 0..reps {
                 attend_head(&ls, std::hint::black_box(&q), 0, nkv, qk, vd, &keys, Some((416, 256)), false, &mut out);
                 std::hint::black_box(&mut out);
@@ -2239,7 +2704,7 @@ mod bench {
         }
         for nested in [false, true] {
             let reps = std::env::var("NX_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20000);
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             for _ in 0..reps {
                 attend_head(&ls, std::hint::black_box(&q), 0, nkv, qk, vd, &keys, Some((416, 256)), nested, &mut out);
                 std::hint::black_box(&mut out);
@@ -2255,27 +2720,27 @@ mod bench {
         let a: Vec<f16> = (0..1024).map(|i| f16::from_f32((i as f32 * 0.11).cos() * 0.1)).collect();
         let mut t = [0f32; 1024];
         let n = 20000;
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         for _ in 0..n {
             kron_native(std::hint::black_box(&z), &a, &a, &mut t);
             std::hint::black_box(&mut t);
         }
         eprintln!("kron stage {:.2} us", t0.elapsed().as_secs_f64() / n as f64 * 1e6);
         let mut zz = z.clone();
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         for _ in 0..n {
             silu_native(std::hint::black_box(&mut zz));
         }
         eprintln!("silu 1024 {:.2} us", t0.elapsed().as_secs_f64() / n as f64 * 1e6);
         let zr: [f32; 16] = std::array::from_fn(|i| i as f32 * 0.3 - 2.0);
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         for _ in 0..n {
             std::hint::black_box(sinkhorn64(std::hint::black_box(&zr)));
         }
         eprintln!("sinkhorn {:.2} us", t0.elapsed().as_secs_f64() / n as f64 * 1e6);
         let x: Vec<f32> = (0..768).map(|i| (i as f32 * 0.37).sin()).collect();
         let mut o = vec![0f32; 768];
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         for _ in 0..n {
             zcn(std::hint::black_box(&x), &x, &mut o);
             std::hint::black_box(&mut o);
@@ -2295,7 +2760,7 @@ mod bench_f16 {
         let srcf: Vec<f32> = src.iter().map(|v| v.to_f32()).collect();
         let x: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.11).cos()).collect();
         let n = 200_000;
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         let mut acc = 0f32;
         for _ in 0..n {
             let mut a = [0f32; 4];
@@ -2305,7 +2770,7 @@ mod bench_f16 {
             acc += a[0] + a[1] + a[2] + a[3];
         }
         eprintln!("f16 scalar to_f32 dot 1024: {:.0} ns ({acc})", t.elapsed().as_secs_f64() / n as f64 * 1e9);
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         let mut acc = 0f32;
         for _ in 0..n {
             let mut a = [0f32; 4];
@@ -2319,7 +2784,7 @@ mod bench_f16 {
         // SAFETY: NEON with fp16 conversions is baseline on Apple silicon.
         unsafe {
             use std::arch::aarch64::*;
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             let mut acc = 0f32;
             for _ in 0..n {
                 let mut a = vdupq_n_f32(0.0);

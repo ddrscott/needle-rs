@@ -1,11 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/needle-core", "crates/needle-engine", "crates/needle-train", "crates/needle-cli", "crates/needle-ffi"]
+members = ["crates/needle-core", "crates/needle-engine", "crates/needle-train", "crates/needle-cli", "crates/needle-ffi", "crates/needle-wasm"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
+repository = "https://github.com/ddrscott/needle-rs"
 rust-version = "1.98"
 
 [workspace.dependencies]
@@ -23,6 +24,8 @@ memmap2 = "0.9"
 rayon = "1"
 clap = { version = "4", features = ["derive"] }
 fancy-regex = "0.14"
+web-time = "1"
+libm = "0.2"
 
 [workspace.lints.clippy]
 # Numeric kernels index several parallel arrays by the same counter; an

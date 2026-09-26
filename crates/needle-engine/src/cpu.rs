@@ -6,6 +6,10 @@ use std::sync::Once;
 
 /// Performance cores (`hw.perflevel0.physicalcpu` on macOS), else all.
 pub fn performance_cores() -> usize {
+    // A browser gives a wasm module one thread.
+    if cfg!(target_arch = "wasm32") {
+        return 1;
+    }
     #[cfg(target_os = "macos")]
     {
         let mut v: i32 = 0;
@@ -93,7 +97,8 @@ unsafe extern "C" {
 pub fn init() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        // Without threads rayon runs on the calling thread by itself.
+        if !cfg!(target_arch = "wasm32") && std::env::var_os("RAYON_NUM_THREADS").is_none() {
             let _ = rayon::ThreadPoolBuilder::new().num_threads(performance_cores()).build_global();
         }
     });

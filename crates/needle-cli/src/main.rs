@@ -258,6 +258,14 @@ enum Command {
         system: String,
         #[arg(long, default_value_t = 512)]
         max: usize,
+        /// Typed decisions: every turn must call a tool, and each enum
+        /// argument comes back with the probability of every option
+        /// (`decisions` in the envelope).
+        #[arg(long)]
+        decide: bool,
+        /// Start each query fresh instead of continuing the conversation.
+        #[arg(long)]
+        fresh: bool,
         /// Queries; each continues the same conversation.
         queries: Vec<String>,
     },
@@ -487,12 +495,16 @@ fn main() -> Result<()> {
             };
             playground::serve(&model, tools, system.trim(), &host, port, max)?;
         }
-        Command::Complete { model, tools, system, max, queries } => {
+        Command::Complete { model, tools, system, max, decide, fresh, queries } => {
             let loaded = loader::load(&model)?;
             let tools: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(&tools)?)?;
             let mut agent = needle_engine::agent::Agent::new(loaded.model.into(), loaded.tokenizer.into(), tools, &system)?;
             for q in queries {
-                println!("{}", needle_engine::agent::envelope_json(&agent.complete(&q, max)?));
+                if fresh {
+                    agent.reset();
+                }
+                let env = if decide { agent.decide(&q, max)? } else { agent.complete(&q, max)? };
+                println!("{}", needle_engine::agent::envelope_json(&env));
             }
         }
         Command::Env { name, checkpoint, lora, max_len, quiet } => {

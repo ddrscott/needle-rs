@@ -1267,7 +1267,7 @@ mod bench {
         let b: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.03).sin()).collect();
         let mut out = vec![0f32; 1024];
         let n = 100_000;
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         for _ in 0..n {
             super::kron_apply_32(std::hint::black_box(&z), &a, &b, &mut out);
             std::hint::black_box(&out);

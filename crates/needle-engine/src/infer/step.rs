@@ -138,8 +138,8 @@ fn ticks() -> u64 {
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+        static START: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(web_time::Instant::now).elapsed().as_nanos() as u64
     }
 }
 
@@ -390,10 +390,10 @@ impl Model {
                     bar();
                 }
             }
-            let clock = std::cell::Cell::new(std::time::Instant::now());
+            let clock = std::cell::Cell::new(web_time::Instant::now());
             let lap = |name: &'static str| {
                 if tid == 0 && crate::prof::enabled() {
-                    let now = std::time::Instant::now();
+                    let now = web_time::Instant::now();
                     crate::prof::add(name, (now - clock.get()).as_secs_f64());
                     clock.set(now);
                 }

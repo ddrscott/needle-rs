@@ -647,25 +647,3 @@ pub fn read_layers(path: &Path) -> Result<usize> {
     std::io::Read::read_exact(&mut f, &mut b)?;
     Ok(Header::parse(&b)?.num_layers as usize)
 }
-
-#[cfg(test)]
-mod dtype_listing {
-    /// `cargo test --release -p needle-core dtype_listing -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn list_record_dtypes() {
-        let path = std::path::Path::new("/Users/spierce/code/needle-rs/models/needle3.cact");
-        if !path.exists() {
-            return;
-        }
-        let a = super::Archive::open(path).unwrap();
-        let mut counts = std::collections::BTreeMap::new();
-        for (i, r) in a.records.iter().enumerate() {
-            *counts.entry(format!("{:?}", r.dtype)).or_insert(0usize) += 1;
-            if i < 40 || (i > 540 && i < 560) {
-                eprintln!("{i:4} {:?} {:?}", r.dtype, r.shape);
-            }
-        }
-        eprintln!("{counts:?}");
-    }
-}

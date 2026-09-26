@@ -83,10 +83,7 @@ pub fn quant_i8(x: &[f32], q: &mut [i8]) -> f32 {
     }
     let m = x.iter().fold(0f32, |m, v| m.max(v.abs()));
     let s = if m > 0.0 { m * K127 } else { 1.0 };
-    let inv = 1.0 / s;
-    for (o, v) in q.iter_mut().zip(x) {
-        *o = (v * inv).round().clamp(-128.0, 127.0) as i8;
-    }
+    quant_with(x, 1.0 / s, q);
     s
 }
 
@@ -118,6 +115,24 @@ pub fn quant_with(x: &[f32], inv: f32, q: &mut [i8]) {
     if x.len().is_multiple_of(16) {
         // SAFETY: NEON is baseline on aarch64; whole 16-element blocks.
         return unsafe { neon::quant_with(x, inv, q) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len().is_multiple_of(16) {
+        // SAFETY: whole 16-element blocks: round half away, then saturating
+        // narrows, as NEON does.
+        unsafe {
+            use std::arch::wasm32::*;
+            let inv = f32x4_splat(inv);
+            for i in (0..x.len()).step_by(16) {
+                let c = |k: usize| {
+                    i32x4_trunc_sat_f32x4(crate::infer::wsimd::round_away(f32x4_mul(v128_load(x.as_ptr().add(i + 4 * k).cast()), inv)))
+                };
+                let lo = i16x8_narrow_i32x4(c(0), c(1));
+                let hi = i16x8_narrow_i32x4(c(2), c(3));
+                v128_store(q.as_mut_ptr().add(i).cast(), i8x16_narrow_i16x8(lo, hi));
+            }
+        }
+        return;
     }
     for (o, v) in q.iter_mut().zip(x) {
         *o = (v * inv).round().clamp(-128.0, 127.0) as i8;
@@ -359,6 +374,17 @@ impl QMat {
             unsafe { neon::decode(self.bits, codes, norms, g, &a.xq, &a.sx, &self.tables, self.cbs, out) };
             return;
         }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            let (g, bpg) = (self.groups, self.bytes_per_group());
+            let codes = &self.codes[rows.start * g * bpg..rows.end * g * bpg];
+            let norms = &self.norms[rows.start * g..rows.end * g];
+            // SAFETY: simd128 is enabled at build time; slices cover the rows
+            // and one token.
+            unsafe { wasm::decode(self.bits, codes, norms, g, &a.xq, &a.sx, &self.tables, self.cbs, out) };
+            return;
+        }
+        #[allow(unreachable_code)]
         for (o, r) in out.iter_mut().zip(rows) {
             *o = self.decode_row_ref(r, a);
         }
@@ -407,6 +433,19 @@ impl QMat {
             // SAFETY: dotprod detected; slices cover `N` token rows.
             return unsafe { neon::prefill_n::<N>(self.bits, codes, &self.tables, norms, self.cbs, xq, sx, stride, block) };
         }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            let (g, bpg) = (self.groups, self.bytes_per_group());
+            let codes = &self.codes[r * g * bpg..(r + 1) * g * bpg];
+            let norms = &self.norms[r * g..(r + 1) * g];
+            let stride = g * GROUP;
+            let xq = &a.xq[t * stride..(t + N) * stride];
+            let sx = &a.sx[t * g..(t + N) * g];
+            // SAFETY: simd128 is enabled at build time; slices cover `N`
+            // token rows.
+            return unsafe { wasm::prefill_n::<N>(self.bits, codes, &self.tables, norms, self.cbs, xq, sx, stride, block) };
+        }
+        #[allow(unreachable_code)]
         std::array::from_fn(|k| self.prefill_row_ref(r, a, t + k, block))
     }
 
@@ -715,6 +754,144 @@ mod neon {
     }
 }
 
+/// The NEON kernels on WebAssembly SIMD: `i8x16.swizzle` is the same
+/// 16-entry table lookup, and widening multiplies with pairwise adds give
+/// `sdot`'s four-byte lane sums exactly. The float combine is the scalar
+/// `fma` in the same order, so results match the NEON kernels bit for bit.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm {
+    use std::arch::wasm32::*;
+
+    use half::f16;
+
+    use super::GROUP;
+
+    #[inline(always)]
+    unsafe fn load(p: *const u8) -> v128 {
+        // SAFETY: the caller keeps 16 bytes readable at `p`; wasm loads need
+        // no alignment.
+        unsafe { v128_load(p.cast()) }
+    }
+
+    /// As `neon::expand`: a group's 128 weights as eight 16-lane vectors in
+    /// the activation layout's order.
+    #[inline(always)]
+    unsafe fn expand(bits: u8, c: *const u8, t0: v128, t1: v128) -> [v128; 8] {
+        unsafe {
+            let mask = u8x16_splat(15);
+            let mut w = [i8x16_splat(0); 8];
+            if bits == 2 {
+                for m in 0..2 {
+                    let b = load(c.add(16 * m));
+                    let (lo, hi) = (v128_and(b, mask), u8x16_shr(b, 4));
+                    w[m] = i8x16_swizzle(t0, lo);
+                    w[2 + m] = i8x16_swizzle(t1, lo);
+                    w[4 + m] = i8x16_swizzle(t0, hi);
+                    w[6 + m] = i8x16_swizzle(t1, hi);
+                }
+            } else {
+                for m in 0..4 {
+                    let b = load(c.add(16 * m));
+                    w[m] = i8x16_swizzle(t0, v128_and(b, mask));
+                    w[4 + m] = i8x16_swizzle(t0, u8x16_shr(b, 4));
+                }
+            }
+            w
+        }
+    }
+
+    /// Byte-pair sums of `w * x`: bytes `0-1, 2-3, 4-5, 6-7` and `8-9, ...,
+    /// 14-15`, added into `lo` and `hi`.
+    #[inline(always)]
+    fn dot_pairs(w: v128, x: v128, lo: &mut v128, hi: &mut v128) {
+        *lo = i32x4_add(*lo, i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(w, x)));
+        *hi = i32x4_add(*hi, i32x4_extadd_pairwise_i16x8(i16x8_extmul_high_i8x16(w, x)));
+    }
+
+    /// Pair sums to `sdot` lanes (bytes `4i..4i+4`).
+    #[inline(always)]
+    fn lanes(lo: v128, hi: v128) -> v128 {
+        i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(lo, hi), i32x4_shuffle::<1, 3, 5, 7>(lo, hi))
+    }
+
+    /// As `neon::decode`, a row at a time.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn decode(
+        bits: u8,
+        codes: &[u8],
+        norms: &[f16],
+        groups: usize,
+        xq: &[i8],
+        sx: &[f32],
+        tables: &[[i8; 16]; 2],
+        cbs: f32,
+        out: &mut [f32],
+    ) {
+        unsafe {
+            let (t0, t1) = (load(tables[0].as_ptr().cast()), load(tables[1].as_ptr().cast()));
+            let bpg = GROUP * bits as usize / 8;
+            for (r, o) in out.iter_mut().enumerate() {
+                let mut acc = [0f32; 4];
+                for g in 0..groups {
+                    let w = expand(bits, codes.as_ptr().add((r * groups + g) * bpg), t0, t1);
+                    let x = xq.as_ptr().add(g * GROUP).cast::<u8>();
+                    let (mut lo, mut hi) = (i32x4_splat(0), i32x4_splat(0));
+                    for (k, wk) in w.iter().enumerate() {
+                        dot_pairs(*wk, load(x.add(16 * k)), &mut lo, &mut hi);
+                    }
+                    let s = lanes(lo, hi);
+                    let sc = (*sx.get_unchecked(g) * cbs) * norms.get_unchecked(r * groups + g).to_f32();
+                    let sv =
+                        [i32x4_extract_lane::<0>(s), i32x4_extract_lane::<1>(s), i32x4_extract_lane::<2>(s), i32x4_extract_lane::<3>(s)];
+                    for (a, v) in acc.iter_mut().zip(sv) {
+                        *a = (v as f32).mul_add(sc, *a);
+                    }
+                }
+                *o = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+            }
+        }
+    }
+
+    /// As `neon::prefill_n`.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn prefill_n<const N: usize>(
+        bits: u8,
+        codes: &[u8],
+        tables: &[[i8; 16]; 2],
+        norms: &[f16],
+        cbs: f32,
+        xq: &[i8],
+        sx: &[f32],
+        stride: usize,
+        block: bool,
+    ) -> [f32; N] {
+        unsafe {
+            let (t0, t1) = (load(tables[0].as_ptr().cast()), load(tables[1].as_ptr().cast()));
+            let bpg = GROUP * bits as usize / 8;
+            let groups = norms.len();
+            let mut accf = [0f32; N];
+            for g in 0..groups {
+                let w = expand(bits, codes.as_ptr().add(g * bpg), t0, t1);
+                let norm = norms.get_unchecked(g).to_f32();
+                for (k, af) in accf.iter_mut().enumerate() {
+                    let x = xq.as_ptr().add(k * stride + g * GROUP).cast::<u8>();
+                    let (mut lo, mut hi) = (i32x4_splat(0), i32x4_splat(0));
+                    for (j, wj) in w.iter().enumerate() {
+                        dot_pairs(*wj, load(x.add(16 * j)), &mut lo, &mut hi);
+                    }
+                    let t = i32x4_add(lo, hi);
+                    let total =
+                        i32x4_extract_lane::<0>(t) + i32x4_extract_lane::<1>(t) + i32x4_extract_lane::<2>(t) + i32x4_extract_lane::<3>(t);
+                    let s = *sx.get_unchecked(k * groups + g);
+                    let sc = if block { (norm * cbs) * s } else { norm * (cbs * s) };
+                    *af = (total as f32).mul_add(sc, *af);
+                }
+            }
+            accf
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,7 +960,7 @@ mod bench_scaling {
     #[ignore]
     fn bench_scaling() {
         use crate::team::{SyncPtr, share, team};
-        let path = std::path::Path::new("/Users/spierce/code/needle-rs/models/needle3.cact");
+        let path = &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/needle3.cact");
         if !path.exists() {
             return;
         }
@@ -796,7 +973,7 @@ mod bench_scaling {
             let mut y = vec![0f32; q.qkvg[0].out];
             let yp = SyncPtr(y.as_mut_ptr());
             let reps = 400;
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             for rep in 0..reps {
                 // Walk every layer so the weights stream as in a real step.
                 let lin = &q.qkvg[rep % 20];
@@ -812,7 +989,7 @@ mod bench_scaling {
             let yp = SyncPtr(y.as_mut_ptr());
             let lin = &q.qkvg[0];
             let reps = 400;
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             for _ in 0..reps {
                 tm.run_n(nt, &|tid, n| lin.rows_into(share(lin.out, tid, n), &a, yp, lin.out));
             }

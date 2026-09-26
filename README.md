@@ -3,10 +3,15 @@
 A Rust port of [Needle 3](https://github.com/cactus-compute/needle), Cactus Compute's 121M-parameter
 tool-calling model. It covers everything the Python package (`cactus-needle` 3.0.1) does: the model
 spec, inference, LoRA fine-tuning, `.cact` export, the hosted-platform client, the playground, and a
-drop-in replacement for the closed native engine library. No Python, no JAX.
+drop-in replacement for the native engine library the package ships as a binary. No Python, no JAX.
 
 It's checked against the Python package at every layer (tokens, logits, gradients, archive bytes), and
 it's 25-180x faster than the Python code paths it replaces.
+
+**Try it in your browser: [ddrscott.github.io/needle-rs](https://ddrscott.github.io/needle-rs/).** The
+same engine, compiled to WebAssembly, turns commands into typed tool calls right in the tab, with a
+probability for every choice. It's a local, free alternative to cloud "typed decision" models like
+TypeSafe's Jev for the kinds of calls a 121M model handles well (see `// NEEDLE_VS_JEV`).
 
 ## // QUICK_START
 
@@ -45,7 +50,7 @@ Everything the reference CLI has, with the same flags and defaults, plus a few d
 | `needle platform finetune \| generate \| jobs \| models \| files \| billing` | The hosted platform at cactuscompute.com |
 | `needle playground [--weights X]` | The browser UI, served locally |
 | `needle serve --tools T` | The native runner's HTTP mode (`POST /complete`, `POST /reset`) |
-| `needle complete --tools T Q...` | Agent turns, one JSON envelope each |
+| `needle complete --tools T Q...` | Agent turns, one JSON envelope each (`--decide` for typed decisions, `--fresh` to reset between queries) |
 | `needle eval data.jsonl --checkpoint X [--lora A]` | Exact-call accuracy of greedy decodes |
 | `needle env smart_home --checkpoint X` | A bundled environment's frozen acceptance suite |
 | `needle synth --output data.jsonl` | Templated smart-home training data (offline, no LLM) |
@@ -60,6 +65,7 @@ Everything the reference CLI has, with the same flags and defaults, plus a few d
 | `needle-train` | The hand-derived reverse pass, LoRA, optax-exact AdamW and schedule, numpy/JAX-exact random streams, the `finetune` loop |
 | `needle-ffi` | `libneedle3`: the `needle.h` C API (`needle_load`, `needle_init`, `needle_complete`, `needle_embed`, `needle_reset`, `needle_last_error`) |
 | `needle-cli` | The `needle` binary |
+| `needle-wasm` | The browser build: the agent over `wasm-bindgen` (`web/` is the demo page) |
 
 ## // SPEED
 
@@ -193,13 +199,73 @@ Validation loss went from 0.386 after epoch 1 to 0.200 after epoch 3 at 2.1 s pe
 steps in 12 minutes, against about 5.6 hours for the same run in JAX. Exact calls on a separate
 validation set went from 31/60 (base) to 37/60 (tuned checkpoint) and 39/60 (the shipped W4 archive).
 
+## // TYPED_DECISIONS
+
+`Agent::decide` (`needle complete --decide`, `needle.decide()` in the browser) runs a turn that must
+call a tool and scores every option of every enum argument it fills, whole option by whole option
+(teacher-forced, token by token), instead of sampling one. The envelope gains a `decisions` list:
+
+```json
+{"tool":"attack","argument":"weapon","choice":"fireball",
+ "probabilities":{"sword":0.0457,"bow":0.4162,"fireball":0.538}}
+```
+
+The chosen call is the one `complete` would pick, but scoring options it would not have scored leaves
+their keys in the attention ring, so later tokens can differ from `complete`'s. It's an extension, not
+part of the native engine's behavior, and the parity claims don't cover it.
+
+## // IN_THE_BROWSER
+
+`crates/needle-wasm` wraps the agent for JavaScript, and `web/` is the demo page
+([live](https://ddrscott.github.io/needle-rs/)). `scripts/build-web.sh` builds it (needs `wasm-pack`);
+serve `web/` with any static server. The page fetches `needle3.cact` (35 MB) from Cactus Compute's
+Hugging Face repo on the first visit and keeps it in Cache Storage.
+
+- The int8 matmuls, attention dots, quantizer and vector exp have WebAssembly SIMD kernels that mirror
+  the NEON ones exactly (`i8x16.swizzle` is the same table lookup; widening multiplies with pairwise
+  adds give `sdot`'s lane sums).
+- WebAssembly has no fused multiply-add, and the engine's arithmetic is fma throughout. Two builds cover
+  it: `pkg-relaxed` uses the CPU's fma through relaxed SIMD, and the page loads it only after checking
+  that the browser really fuses `relaxed_madd` (the spec lets it not); `pkg` computes each fma in f64
+  and redoes in software the rare lane whose f64 sum sits exactly on an f32 rounding midpoint. A
+  self-test (`simdSelftest`) checks both against scalar `fmaf` on 17M random inputs and a million
+  constructed midpoint cases. The two builds give byte-identical envelopes on all 192 bundled cases.
+- Against the native engine, the browser build makes the same calls on 188 of the 192 cases, and
+  confidence matches on the median case (90% within 0.005). The drift is the math library: Apple's
+  `expf`, `exp` and `powf` aren't correctly rounded and the musl port used here rounds differently
+  (musl's `expf` disagrees with Apple's on 0.9% of inputs; 4 of the 24 RoPE frequencies differ).
+- A command takes about 0.6-0.9 s in Chrome on an M3 Pro (decode about 90 tok/s, prefill about
+  140 tok/s, one thread); switching tool sets costs one read of the tools, and the page keeps an agent
+  per tool set.
+
+## // NEEDLE_VS_JEV
+
+[Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) (TypeSafe AI) answers typed
+questions with probabilities instead of text, from a cloud API. Needle returns the same shape (typed,
+schema-valid values plus how sure it is) on the device.
+
+| | Jev | Needle 3 on needle-rs |
+| --- | --- | --- |
+| Returns | Typed answers (Choice, Score, Noul) with probabilities and confidence | Schema-valid tool calls, a confidence, and per-option probabilities for enum arguments |
+| Runs | TypeSafe's API | The browser, the native library, the CLI |
+| Latency | 70-500 ms end to end (TypeSafe's figure) | About 25 ms a turn native on an M3 Pro, 0.6-0.9 s in the browser (measured) |
+| Price | $0.042 per million input tokens, output free | Free |
+| Weights | Closed, early access | Open (Apache-2.0); this engine is MIT |
+| Breadth | Frontier-scale judgment | 121M parameters: strong at commands to calls, weak at open-ended judgment |
+
+The honest read: they're two tiers, not rivals. Needle takes the frequent, well-formed commands on the
+device, and its confidence (or its grounding check withholding a call) says when to hand a request to
+Jev or a bigger model. In our tests it routed game, robot-arm and car commands well, and sorted
+support tickets into teams whose names never appear in the text poorly (2 of 4); that kind of
+judgment is Jev's pitch, not Needle's.
+
 ## // DEVELOPMENT
 
 - `cargo test --release` runs the unit tests plus every oracle test whose fixture exists.
 - Fixtures come from the reference's venv:
   `~/git/needle/.venv/bin/python tests/oracle/fixtures.py tokenizer|export|logits|split_quant|cells|grads|float_grads`.
-- `NEEDLE_PROFILE=1` prints a span breakdown. `NEEDLE_THREADS` sets the team size (default: one fewer
-  than the performance cores). `NEEDLE_F32=1` loads a `.cact` dequantized instead of packed.
+- `NEEDLE_PROFILE=1` prints a span breakdown. `NEEDLE_THREADS` pins the team size (default: the
+  performance cores, with the decode step choosing how many to use from measured stalls). `NEEDLE_F32=1` loads a `.cact` dequantized instead of packed.
   `NEEDLE_CHUNK_STEP=1` runs single tokens through the chunk path instead of the fused step, and
   `NEEDLE_CHUNK_OPS=1` runs prompt chunks as one operation at a time instead of one job (all three
   agree bit for bit). `NX_MEMBERS_LOG=1` prints the member-count decisions. `NEEDLE_TURN_TIMES=1` prints each agent
@@ -209,7 +275,17 @@ validation set went from 31/60 (base) to 37/60 (tuned checkpoint) and 39/60 (the
   whole-suite envelope comparisons, single probes, and end-to-end latency. See its README.
 - `docs/engine-rules.md` records what the native engine does around the model (decoding, confidence,
   grounding gates, repairs), the evidence for each rule, and which ones this port matches.
+- `scripts/build-web.sh` builds the browser engines into `web/pkg` and `web/pkg-relaxed`; pushing to
+  `main` publishes `web/` to GitHub Pages.
 - `cargo clippy --all-targets` and `cargo fmt --check` are clean. The MSRV is 1.98 (NEON `sdot`).
 
-Needle 3 and its weights are Cactus Compute's, under Apache-2.0. The playground UI in
-`crates/needle-cli/playground/` is copied from the reference package.
+## // LICENSE_AND_THANKS
+
+needle-rs is MIT-licensed (`LICENSE`).
+
+A big thank-you to [Cactus Compute](https://github.com/cactus-compute/needle) for Needle 3: the model,
+its weights ([Hugging Face](https://huggingface.co/Cactus-Compute/needle3)), and the reference package
+and engine this port was built and checked against. All of that is theirs, under Apache-2.0, and none
+of it is redistributed here: the weights are downloaded from their repo. The playground UI in
+`crates/needle-cli/playground/` is copied from the reference package and keeps its Apache-2.0 license
+(`crates/needle-cli/playground/LICENSE`).

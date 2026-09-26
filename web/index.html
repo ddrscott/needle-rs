@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>needle-rs in the browser</title>
+<meta name="description" content="Needle 3, a 121M-parameter tool-calling model, running locally in your browser through a Rust engine compiled to WebAssembly. Typed calls with probabilities, no server.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231A1A1A'/%3E%3Ctext x='6' y='24' font-family='monospace' font-size='22' font-weight='700' fill='%23E85D00'%3E$%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wrap bar-row">
+    <a class="mark" href="./"><span class="prompt">$</span> needle-rs</a>
+    <nav>
+      <a href="https://github.com/ddrscott/needle-rs">github</a>
+      <a href="https://github.com/cactus-compute/needle">needle</a>
+      <a href="https://huggingface.co/Cactus-Compute/needle3">weights</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>Typed tool calls, right in this tab.</h1>
+    <p class="lede">
+      <a href="https://github.com/cactus-compute/needle">Needle 3</a> is Cactus Compute's
+      121M-parameter tool-calling model. This page runs it on
+      <a href="https://github.com/ddrscott/needle-rs">needle-rs</a>, a Rust engine compiled to WebAssembly.
+      You type a command, you get back a schema-valid function call with a probability for every choice it made.
+      Nothing leaves your browser: no server, no API key, and it keeps working offline after the first load.
+    </p>
+    <div class="status" id="status" aria-live="polite">
+      <span class="prompt">$</span> <span id="status-text">starting the engine</span><span class="cursor"></span>
+      <div class="meter" id="meter" hidden><div id="meter-fill"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="slashes">//</span> TRY_IT</h2>
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <div class="grid">
+      <div class="panel" id="left">
+        <p class="blurb" id="blurb"></p>
+        <div class="label">tools</div>
+        <pre class="tools" id="tools"></pre>
+        <div id="custom" hidden>
+          <label class="label" for="custom-tools">tools json (OpenAI function schemas)</label>
+          <textarea id="custom-tools" spellcheck="false" rows="12"></textarea>
+          <label class="label" for="custom-system">system facts (optional)</label>
+          <textarea id="custom-system" spellcheck="false" rows="2" placeholder="user: Pat; home: Chicago"></textarea>
+        </div>
+        <div class="label">try one</div>
+        <div class="chips" id="chips"></div>
+        <form id="ask" class="ask">
+          <span class="prompt">$</span>
+          <input id="input" autocomplete="off" placeholder="type a command" aria-label="command">
+          <button id="run" type="submit" disabled>run</button>
+        </form>
+        <div class="opts">
+          <label><input type="checkbox" id="decide" checked> score every option</label>
+          <label>act at confidence &ge; <input type="number" id="threshold" min="0" max="1" step="0.05" value="0.7"></label>
+        </div>
+      </div>
+      <div class="panel" id="right">
+        <div class="empty" id="empty">Pick an example on the left, or type your own command.</div>
+        <div id="result" hidden>
+          <div class="verdict" id="verdict"></div>
+          <div class="label">call</div>
+          <pre class="json" id="call"></pre>
+          <div id="decisions"></div>
+          <div class="label">confidence</div>
+          <div class="conf"><div class="conf-bar"><div id="conf-fill"></div><div id="conf-mark"></div></div><span id="conf-num"></span></div>
+          <div class="label">reasoning</div>
+          <p class="reasoning" id="reasoning"></p>
+          <div class="timing" id="timing"></div>
+        </div>
+      </div>
+    </div>
+    <div class="label">history</div>
+    <ol class="history" id="history"></ol>
+  </section>
+
+  <section>
+    <h2><span class="slashes">//</span> NEEDLE_VS_JEV</h2>
+    <p>
+      <a href="https://typesafe.ai/blog/introducing-system-one-models-and-jev">Jev</a>, from TypeSafe AI, is a
+      cloud model that answers typed questions (a Choice, a Score, a Noul) with probabilities instead of text.
+      That's the same shape this page returns: typed values your code can branch on, plus how sure the model is.
+      The difference is where it runs and what it costs.
+    </p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>Jev (TypeSafe AI)</th><th>Needle 3 on needle-rs</th></tr></thead>
+      <tbody>
+        <tr><th>Returns</th><td>Typed answers with probabilities and confidence</td><td>Schema-valid tool calls, a confidence, and the probability of every enum option</td></tr>
+        <tr><th>Runs</th><td>TypeSafe's API</td><td>Your device: this tab, a native library, or the CLI</td></tr>
+        <tr><th>Latency</th><td>70&ndash;500 ms end to end, per TypeSafe</td><td>About 0.5&ndash;1 s a command in this tab; about 25 ms native on an M3 Pro</td></tr>
+        <tr><th>Price</th><td>$0.042 per million input tokens, output free</td><td>Free, on hardware you already have</td></tr>
+        <tr><th>Weights</th><td>Closed, early access</td><td>Open (Apache-2.0, Cactus Compute); this engine is MIT</td></tr>
+        <tr><th>Privacy</th><td>Requests go to the API</td><td>Nothing leaves the page; works offline</td></tr>
+        <tr><th>Smarts</th><td>A frontier-scale model built for judgment calls</td><td>121M parameters: good at turning commands into calls, weak at open-ended judgment</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p>
+      They aren't really rivals so much as two tiers. Needle handles the easy, frequent calls on the device for
+      free, and its confidence tells you when a request is past it. Send only those to Jev or a bigger model:
+    </p>
+<pre class="code"><span class="c">// Needle first; escalate only when it isn't sure.</span>
+const r = JSON.parse(needle.decide(text, 256));
+if (r.function_calls.length &amp;&amp; r.confidence &gt;= 0.7) {
+  act(r.function_calls);   <span class="c">// local, free, private</span>
+} else {
+  escalate(text);          <span class="c">// Jev, an LLM, or a person</span>
+}</pre>
+    <p class="note">
+      Try "tell the innkeeper we need a room for the night" in the game example: Needle reaches for
+      <code>attack</code> instead of <code>speak</code>, and either its low confidence or the engine's own
+      grounding check flags it, which is exactly what the escalation path is for. And it's not a
+      general classifier. In our tests, sorting support tickets into teams whose names never appear in the text
+      got 2 of 4 right; that kind of judgment is Jev's pitch, not Needle's.
+      Jev figures come from TypeSafe's <a href="https://typesafe.ai/blog/introducing-system-one-models-and-jev">launch post</a>
+      and <a href="https://docs.typesafe.ai/introduction">docs</a>; Needle figures are measured.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="slashes">//</span> HOW_IT_WORKS</h2>
+    <ul class="facts">
+      <li><b>Same engine as native.</b> needle-rs reproduces the native Needle library bit for bit on macOS: all 192 bundled cases and every multi-turn test conversation.</li>
+      <li><b>In the browser,</b> the math library differs from Apple's, so a few results drift: 188 of the same 192 cases make the same calls, and confidence matches on the median case.</li>
+      <li><b>WebAssembly SIMD</b> runs the int8 matmuls and attention. The engine needs exact fused multiply-add, which WebAssembly lacks, so the page uses the CPU's own fma through relaxed SIMD when a check proves the browser fuses it, and an exact software fma otherwise. Both give byte-identical answers.</li>
+      <li><b>"Score every option"</b> scores each enum value in full (teacher-forced, token by token) and normalizes over the options, instead of sampling one.</li>
+      <li><b>The model</b> (35 MB) comes straight from Cactus Compute's Hugging Face repo on the first visit and is cached after that.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="slashes">//</span> CREDITS</h2>
+    <p>
+      Thank you to <a href="https://github.com/cactus-compute/needle">Cactus Compute</a> for Needle 3, its weights,
+      and the reference package this port was checked against, all under Apache-2.0. needle-rs is an independent,
+      MIT-licensed port by <a href="https://github.com/ddrscott">Scott Pierce</a>.
+    </p>
+  </section>
+</main>
+
+<footer class="wrap foot"><span class="prompt">$</span> built with Rust, WebAssembly and a 121M-parameter model</footer>
+<script type="module" src="app.js"></script>
+</body>
+</html>

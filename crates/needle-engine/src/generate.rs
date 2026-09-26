@@ -101,10 +101,10 @@ pub fn generate(
     let mut stats = GenStats { prompt_tokens: ids.len(), ..Default::default() };
     let mut rng = Rng::new(opts.seed);
     let mut s = model.session();
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     let mut logits = model.forward(&mut s, &ids, Outputs::LastLogits).data;
     stats.prefill_secs = t0.elapsed().as_secs_f64();
-    let t1 = std::time::Instant::now();
+    let t1 = web_time::Instant::now();
     let mut generated: Vec<u32> = Vec::new();
     let mut printed = String::new();
     for _ in ids.len() - 1..buf_len - 1 {

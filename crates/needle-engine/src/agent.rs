@@ -8,7 +8,7 @@
 //! returns.
 
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 use anyhow::{Result, bail};
 use needle_core::Tokenizer;
@@ -64,6 +64,40 @@ pub struct Agent {
     /// Tools that must be called when a pattern matches the request
     /// (case-insensitive), by normalized name.
     triggers: Vec<(Vec<u8>, Vec<fancy_regex::Regex>)>,
+    /// [`Agent::decide`]: every enum value is scored option by option, and
+    /// the distributions land in `decisions`.
+    score_all: bool,
+    decisions: Vec<Value>,
+}
+
+/// The tool and argument whose string value `body` (a call list cut right
+/// after the value's opening quote) is about to fill: the last `"name"` and
+/// the last key.
+fn open_value_path(body: &str) -> (String, String) {
+    let strings = |s: &str| -> Vec<String> {
+        let mut out = vec![];
+        let mut cur: Option<String> = None;
+        let mut esc = false;
+        for ch in s.chars() {
+            match (&mut cur, ch) {
+                (Some(c), _) if esc => {
+                    c.push(ch);
+                    esc = false;
+                }
+                (Some(_), '\\') => esc = true,
+                (Some(_), '"') => out.push(cur.take().unwrap_or_default()),
+                (Some(c), _) => c.push(ch),
+                (None, '"') => cur = Some(String::new()),
+                _ => {}
+            }
+        }
+        out
+    };
+    let head = body.strip_suffix('"').unwrap_or(body);
+    let all = strings(head);
+    let arg = all.last().cloned().unwrap_or_default();
+    let tool = all.windows(2).rev().find(|w| w[0] == "name").map(|w| w[1].clone()).unwrap_or_default();
+    (tool, arg)
 }
 
 /// The running conversation text is cut back to its last 12 KiB once it
@@ -146,6 +180,8 @@ impl Agent {
             rule_tools,
             conversation: grounding.clone(),
             grounding,
+            score_all: false,
+            decisions: vec![],
         };
         // The engine ranks tools per turn only when the model ships a
         // dedicated embedding readout (`0x2468`); the confidence head's pool
@@ -516,7 +552,7 @@ impl Agent {
     /// Teacher-force each option sequence from the current state and return
     /// the likeliest (first on ties) with its share of the options' total
     /// likelihood. The session is left as it was.
-    fn score_options(&mut self, seqs: &[Vec<u32>], logits: &[f32]) -> (usize, f64) {
+    fn score_options(&mut self, seqs: &[Vec<u32>], logits: &[f32]) -> (usize, f64, Vec<f64>) {
         let mut scores = Vec::with_capacity(seqs.len());
         for seq in seqs {
             let mut score = token_prob_excluding(logits, seq[0], &[]).ln();
@@ -540,7 +576,8 @@ impl Agent {
             }
         }
         let z: f64 = scores.iter().filter(|&&s| s > -1e29).map(|s| (s - scores[best]).exp()).sum();
-        (best, if z > 0.0 { 1.0 / z } else { 1.0 })
+        let probs = scores.iter().map(|&s| if s > -1e29 && z > 0.0 { (s - scores[best]).exp() / z } else { 0.0 }).collect();
+        (best, if z > 0.0 { 1.0 / z } else { 1.0 }, probs)
     }
 
     /// The engine's `(sink, ring)` attention span for a sink of `sink`
@@ -593,6 +630,25 @@ impl Agent {
     }
 
     /// One turn: the envelope as JSON.
+    /// A turn that must call a tool and scores every option of every enum
+    /// argument it fills: the typed-decision use (route this, classify
+    /// that). The envelope gains `decisions`, one per enum value, each with
+    /// the chosen option and the probability of every option (whole-option
+    /// likelihoods, normalized over the options). The call itself is picked
+    /// as [`Agent::complete`] picks it, but scoring options it would not
+    /// have scored can steer what follows, so the two can differ.
+    pub fn decide(&mut self, text: &str, max_new_tokens: usize) -> Result<Value> {
+        self.score_all = true;
+        self.decisions.clear();
+        let out = self.complete(text, max_new_tokens);
+        self.score_all = false;
+        let mut env = out?;
+        if let Value::Object(m) = &mut env {
+            m.insert("decisions".into(), Value::Array(std::mem::take(&mut self.decisions)));
+        }
+        Ok(env)
+    }
+
     pub fn complete(&mut self, text: &str, max_new_tokens: usize) -> Result<Value> {
         let is_result = self.last_was_call && looks_like_result(text);
         self.conversation.push(b'\n');
@@ -615,7 +671,9 @@ impl Agent {
                 .map(|(n, _)| n.clone())
                 .collect()
         };
-        let mut grammar = Grammar::from_text(&tools_text).with_context(&self.conversation).must_call(is_result || !triggered.is_empty());
+        let mut grammar = Grammar::from_text(&tools_text)
+            .with_context(&self.conversation)
+            .must_call(is_result || !triggered.is_empty() || self.score_all);
         if !triggered.is_empty() {
             grammar = grammar.allow_only(triggered.clone());
         }
@@ -810,7 +868,8 @@ impl Agent {
                 // system text and every input) mentions it, not just this
                 // turn.
                 let hay = String::from_utf8_lossy(&self.conversation);
-                let named: Vec<&String> = options.iter().filter(|o| names_option(&hay, o)).collect();
+                let named: Vec<&String> =
+                    if self.score_all { options.iter().collect() } else { options.iter().filter(|o| names_option(&hay, o)).collect() };
                 if !named.is_empty() {
                     let seqs: Vec<Vec<u32>> = named
                         .iter()
@@ -826,7 +885,19 @@ impl Agent {
                         Some(st) => self.step_logits(&st, &logits, sparse),
                         None => logits.clone(),
                     };
-                    let (best, p) = self.score_options(&seqs, &base);
+                    let (best, p, probs) = self.score_options(&seqs, &base);
+                    if self.score_all {
+                        let body = self.tok.decode(&call_ids);
+                        let (tool, arg) = open_value_path(&body);
+                        let dist: serde_json::Map<String, Value> =
+                            named.iter().zip(&probs).map(|(o, &q)| ((*o).clone(), json!(round(q, 4)))).collect();
+                        self.decisions.push(json!({
+                            "tool": tool,
+                            "argument": arg,
+                            "choice": named[best],
+                            "probabilities": dist,
+                        }));
+                    }
                     let ids = &seqs[best];
                     if debug_flag(&CALL_PROBS, "NEEDLE_CALL_PROBS") {
                         eprintln!("  named option {ids:?} {:?} p {p:.6}", named[best]);
@@ -1244,7 +1315,7 @@ mod bench_prob {
     fn bench_turn_token_prob() {
         let logits: Vec<f32> = (0..8192).map(|i| ((i * 7919 % 1000) as f32) / 100.0 - 5.0).collect();
         let n = 2000;
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         let mut acc = 0f64;
         for i in 0..n {
             acc += super::turn_token_prob(std::hint::black_box(&logits), (i % 8192) as u32);
@@ -1259,7 +1330,7 @@ mod bench_prob {
         }
         assert_eq!(super::lane_exp_sums(&logits, lt), lanes);
         eprintln!("turn_token_prob {:.1} us ({acc:.3})", t.elapsed().as_secs_f64() / n as f64 * 1e6);
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         for _ in 0..n {
             std::hint::black_box(super::argmax(std::hint::black_box(&logits)));
         }
