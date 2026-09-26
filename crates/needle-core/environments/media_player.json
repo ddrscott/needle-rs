@@ -1,0 +1,373 @@
+{
+ "name": "media_player",
+ "system": "Map each explicit supported media action to exactly one declared call; never duplicate an action. Do not guess missing values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+ "tools": [
+  {
+   "name": "play_music",
+   "description": "Play music by song name, artist, album, or genre. Copy the request word for word. Use the playback tools for pausing, resuming, or skipping.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "The song, artist, album, or genre, copied word for word.",
+      "minLength": 1,
+      "maxLength": 80
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  },
+  {
+   "name": "pause_media",
+   "description": "Pause the currently playing media. Takes no arguments.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  },
+  {
+   "name": "resume_media",
+   "description": "Resume the paused media playback. Starting something new is play_music. Takes no arguments.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  },
+  {
+   "name": "skip_track",
+   "description": "Skip to the next track. Takes no arguments.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  },
+  {
+   "name": "set_volume",
+   "description": "Set the speaker volume. This never pauses or skips anything.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "level": {
+      "type": "integer",
+      "description": "Volume level from 0 to 100.",
+      "minimum": 0,
+      "maximum": 100
+     }
+    },
+    "required": [
+     "level"
+    ]
+   }
+  }
+ ],
+ "test_cases": [
+  {
+   "query": "play Purple Rain by Prince",
+   "calls": [
+    {
+     "name": "play_music",
+     "arguments": {
+      "query": "Purple Rain by Prince"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "put on some smooth jazz",
+   "calls": [
+    {
+     "name": "play_music",
+     "arguments": {
+      "query": "smooth jazz"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "queue up Blinding Lights by The Weeknd",
+   "calls": [
+    {
+     "name": "play_music",
+     "arguments": {
+      "query": "Blinding Lights by The Weeknd"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "play some lofi beats",
+   "calls": [
+    {
+     "name": "play_music",
+     "arguments": {
+      "query": "lofi beats"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "put on Hotel California by the Eagles",
+   "calls": [
+    {
+     "name": "play_music",
+     "arguments": {
+      "query": "Hotel California by the Eagles"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "play Bohemian Rhapsody by Queen",
+   "calls": [
+    {
+     "name": "play_music",
+     "arguments": {
+      "query": "Bohemian Rhapsody by Queen"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "set the volume to 40",
+   "calls": [
+    {
+     "name": "set_volume",
+     "arguments": {
+      "level": 40
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "turn the volume up to 85",
+   "calls": [
+    {
+     "name": "set_volume",
+     "arguments": {
+      "level": 85
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "lower the volume to 15",
+   "calls": [
+    {
+     "name": "set_volume",
+     "arguments": {
+      "level": 15
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "set the speaker volume to 60",
+   "calls": [
+    {
+     "name": "set_volume",
+     "arguments": {
+      "level": 60
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "crank the volume up to 95",
+   "calls": [
+    {
+     "name": "set_volume",
+     "arguments": {
+      "level": 95
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "pause the music",
+   "calls": [
+    {
+     "name": "pause_media",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "hit pause on the song",
+   "calls": [
+    {
+     "name": "pause_media",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "pause playback while I take this call",
+   "calls": [
+    {
+     "name": "pause_media",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "resume the music",
+   "calls": [
+    {
+     "name": "resume_media",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "resume playback where it left off",
+   "calls": [
+    {
+     "name": "resume_media",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "skip this song",
+   "calls": [
+    {
+     "name": "skip_track",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "skip to the next track",
+   "calls": [
+    {
+     "name": "skip_track",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "turn up the volume a little",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "play something for me",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "turn the music down a bit",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "play whatever you think I'd like",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "put on the podcast Hard Fork",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "tune into the radio station Jazz FM",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "add this song to my favorites playlist",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "don't pause the song, I love this part",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "do not turn the volume up to 90",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "never play Baby Shark on this speaker again",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "set the volume to 140",
+   "calls": [],
+   "category": "invalid",
+   "critical": true
+  },
+  {
+   "query": "turn the volume up to 500",
+   "calls": [],
+   "category": "invalid",
+   "critical": true
+  },
+  {
+   "query": "set the volume to 55 and play Clair de Lune by Debussy",
+   "calls": [
+    {
+     "name": "set_volume",
+     "arguments": {
+      "level": 55
+     }
+    },
+    {
+     "name": "play_music",
+     "arguments": {
+      "query": "Clair de Lune by Debussy"
+     }
+    }
+   ],
+   "category": "parallel"
+  },
+  {
+   "query": "pause the music and turn the volume down to 20",
+   "calls": [
+    {
+     "name": "pause_media",
+     "arguments": {}
+    },
+    {
+     "name": "set_volume",
+     "arguments": {
+      "level": 20
+     }
+    }
+   ],
+   "category": "parallel"
+  }
+ ]
+}

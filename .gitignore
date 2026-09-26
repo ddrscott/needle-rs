@@ -1,0 +1,8 @@
+/target
+/models
+*.safetensors
+*.cact
+/tests/oracle/*.npz
+/tests/oracle/*.bin
+.venv
+__pycache__/

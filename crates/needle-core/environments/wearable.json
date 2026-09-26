@@ -1,0 +1,413 @@
+{
+ "name": "wearable",
+ "system": "Copy reply text verbatim, preserving capitalization. Map each explicit supported watch action to exactly one declared call. Do not guess missing values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+ "tools": [
+  {
+   "name": "reply_to_notification",
+   "description": "Reply to a message notification from a known sender. Copy the reply text word for word, preserving capitalization. Use dismiss_notification to clear one without replying.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "notification_match": {
+      "type": "string",
+      "enum": [
+       "Maya",
+       "Leo",
+       "Dr. Patel",
+       "Cactus Team"
+      ],
+      "description": "Who the notification is from."
+     },
+     "text": {
+      "type": "string",
+      "description": "The reply message copied word for word.",
+      "minLength": 1,
+      "maxLength": 240
+     }
+    },
+    "required": [
+     "notification_match",
+     "text"
+    ]
+   }
+  },
+  {
+   "name": "dismiss_notification",
+   "description": "Dismiss a sender's notification without replying.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "notification_match": {
+      "type": "string",
+      "enum": [
+       "Maya",
+       "Leo",
+       "Dr. Patel",
+       "Cactus Team"
+      ],
+      "description": "Whose notification to dismiss."
+     }
+    },
+    "required": [
+     "notification_match"
+    ]
+   }
+  },
+  {
+   "name": "start_workout",
+   "description": "Start tracking a workout of an explicitly named type: running, walking, cycling, swimming, strength, or yoga. Use end_workout to finish one already running.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "workout_type": {
+      "type": "string",
+      "enum": [
+       "running",
+       "walking",
+       "cycling",
+       "swimming",
+       "strength",
+       "yoga"
+      ],
+      "description": "The type of workout the user named."
+     }
+    },
+    "required": [
+     "workout_type"
+    ]
+   }
+  },
+  {
+   "name": "end_workout",
+   "description": "End the current workout session. Starting a new one is start_workout. Takes no arguments.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  },
+  {
+   "name": "find_my_phone",
+   "description": "Trigger the phone to ring so you can find it. Takes no arguments.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  }
+ ],
+ "test_cases": [
+  {
+   "query": "reply to Maya saying be there in 10 minutes",
+   "calls": [
+    {
+     "name": "reply_to_notification",
+     "arguments": {
+      "notification_match": "Maya",
+      "text": "be there in 10 minutes"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "reply to Dr. Patel with See you Thursday",
+   "calls": [
+    {
+     "name": "reply_to_notification",
+     "arguments": {
+      "notification_match": "Dr. Patel",
+      "text": "See you Thursday"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "answer the Cactus Team message saying the build is green",
+   "calls": [
+    {
+     "name": "reply_to_notification",
+     "arguments": {
+      "notification_match": "Cactus Team",
+      "text": "the build is green"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "send Leo a reply that says lunch works for me",
+   "calls": [
+    {
+     "name": "reply_to_notification",
+     "arguments": {
+      "notification_match": "Leo",
+      "text": "lunch works for me"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "dismiss the notification from Leo",
+   "calls": [
+    {
+     "name": "dismiss_notification",
+     "arguments": {
+      "notification_match": "Leo"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "swipe away the alert from Maya",
+   "calls": [
+    {
+     "name": "dismiss_notification",
+     "arguments": {
+      "notification_match": "Maya"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "clear the Dr. Patel notification",
+   "calls": [
+    {
+     "name": "dismiss_notification",
+     "arguments": {
+      "notification_match": "Dr. Patel"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "get rid of the Cactus Team notification",
+   "calls": [
+    {
+     "name": "dismiss_notification",
+     "arguments": {
+      "notification_match": "Cactus Team"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "start a running workout",
+   "calls": [
+    {
+     "name": "start_workout",
+     "arguments": {
+      "workout_type": "running"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "begin a swimming session on my watch",
+   "calls": [
+    {
+     "name": "start_workout",
+     "arguments": {
+      "workout_type": "swimming"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "kick off some strength training",
+   "calls": [
+    {
+     "name": "start_workout",
+     "arguments": {
+      "workout_type": "strength"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "track a cycling workout",
+   "calls": [
+    {
+     "name": "start_workout",
+     "arguments": {
+      "workout_type": "cycling"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "go ahead and start a walking workout",
+   "calls": [
+    {
+     "name": "start_workout",
+     "arguments": {
+      "workout_type": "walking"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "end my workout",
+   "calls": [
+    {
+     "name": "end_workout",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "finish the current workout session",
+   "calls": [
+    {
+     "name": "end_workout",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "wrap up my workout now",
+   "calls": [
+    {
+     "name": "end_workout",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "find my phone",
+   "calls": [
+    {
+     "name": "find_my_phone",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "make my phone ring so I can locate it",
+   "calls": [
+    {
+     "name": "find_my_phone",
+     "arguments": {}
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "send a reply to Maya",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "dismiss the latest notification",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "start a workout",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "reply saying I am stuck in a meeting",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "check my heart rate on the watch",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "call Maya from my watch",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "show my step count for today",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "don't reply to the message from Leo",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "do not start a running workout yet",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "never dismiss notifications from Dr. Patel",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "reply to Priya saying happy birthday",
+   "calls": [],
+   "category": "invalid",
+   "critical": true
+  },
+  {
+   "query": "start a pilates workout",
+   "calls": [],
+   "category": "invalid",
+   "critical": true
+  },
+  {
+   "query": "dismiss the notification from Leo and start a strength workout",
+   "calls": [
+    {
+     "name": "dismiss_notification",
+     "arguments": {
+      "notification_match": "Leo"
+     }
+    },
+    {
+     "name": "start_workout",
+     "arguments": {
+      "workout_type": "strength"
+     }
+    }
+   ],
+   "category": "parallel"
+  },
+  {
+   "query": "find my phone and reply to Maya saying almost home",
+   "calls": [
+    {
+     "name": "reply_to_notification",
+     "arguments": {
+      "notification_match": "Maya",
+      "text": "almost home"
+     }
+    },
+    {
+     "name": "find_my_phone",
+     "arguments": {}
+    }
+   ],
+   "category": "parallel"
+  }
+ ]
+}

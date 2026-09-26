@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/needle-core", "crates/needle-engine", "crates/needle-train", "crates/needle-cli", "crates/needle-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.98"
+
+[workspace.dependencies]
+needle-core = { path = "crates/needle-core" }
+needle-engine = { path = "crates/needle-engine" }
+needle-train = { path = "crates/needle-train" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+half = { version = "2", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+safetensors = "0.6"
+memmap2 = "0.9"
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+fancy-regex = "0.14"
+
+[workspace.lints.clippy]
+# Numeric kernels index several parallel arrays by the same counter; an
+# iterator chain there reads worse than the loop.
+needless_range_loop = "allow"
+# Kernel entry points take their operand geometry explicitly.
+too_many_arguments = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 3

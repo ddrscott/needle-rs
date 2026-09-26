@@ -1,0 +1,28 @@
+[package]
+name = "needle-cli"
+description = "The `needle` command: run, finetune, build, download"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "needle"
+path = "src/main.rs"
+
+[dependencies]
+needle-core.workspace = true
+needle-engine.workspace = true
+needle-train.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+ureq = { version = "2", features = ["json"] }
+tiny_http = "0.12"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sha2 = "0.10"
+base64 = "0.22"
+
+[lints]
+workspace = true

@@ -1,0 +1,437 @@
+{
+ "name": "kitchen_appliance",
+ "system": "Map each explicit supported appliance action to exactly one declared call; never duplicate an action. Do not guess missing values. Unsupported, invalid, ambiguous, and negated requests return no call.",
+ "tools": [
+  {
+   "name": "set_oven",
+   "description": "Preheat or set the oven to a temperature in degrees Celsius. Use get_appliance_status to check on it.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "temperature": {
+      "type": "integer",
+      "description": "Target temperature in degrees Celsius.",
+      "minimum": 50,
+      "maximum": 250
+     }
+    },
+    "required": [
+     "temperature"
+    ]
+   }
+  },
+  {
+   "name": "control_coffee_maker",
+   "description": "Control the coffee maker. Never use this for the oven or the dishwasher.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "action": {
+      "type": "string",
+      "enum": [
+       "brew",
+       "stop",
+       "warm"
+      ],
+      "description": "brew, stop, or warm."
+     }
+    },
+    "required": [
+     "action"
+    ]
+   }
+  },
+  {
+   "name": "start_dishwasher",
+   "description": "Start the dishwasher, optionally on a stated wash cycle.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "cycle": {
+      "type": "string",
+      "enum": [
+       "eco",
+       "heavy",
+       "quick"
+      ],
+      "description": "The wash cycle; include only when stated."
+     }
+    }
+   }
+  },
+  {
+   "name": "set_cooking_timer",
+   "description": "Set a named cooking timer.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "label": {
+      "type": "string",
+      "description": "Label for the timer, copied from the user.",
+      "minLength": 1,
+      "maxLength": 40
+     },
+     "minutes": {
+      "type": "integer",
+      "description": "Timer duration in minutes.",
+      "minimum": 1,
+      "maximum": 360
+     }
+    },
+    "required": [
+     "label",
+     "minutes"
+    ]
+   }
+  },
+  {
+   "name": "get_appliance_status",
+   "description": "Read an appliance's current status. This changes nothing; any request to change settings uses the other tools.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "appliance": {
+      "type": "string",
+      "enum": [
+       "oven",
+       "coffee_maker",
+       "dishwasher"
+      ],
+      "description": "Which appliance to check."
+     }
+    },
+    "required": [
+     "appliance"
+    ]
+   }
+  }
+ ],
+ "test_cases": [
+  {
+   "query": "preheat the oven to 180 degrees",
+   "calls": [
+    {
+     "name": "set_oven",
+     "arguments": {
+      "temperature": 180
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "set the oven to 220 degrees",
+   "calls": [
+    {
+     "name": "set_oven",
+     "arguments": {
+      "temperature": 220
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "bake at 200 degrees",
+   "calls": [
+    {
+     "name": "set_oven",
+     "arguments": {
+      "temperature": 200
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "bring the oven up to 160 degrees",
+   "calls": [
+    {
+     "name": "set_oven",
+     "arguments": {
+      "temperature": 160
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "brew a fresh pot of coffee",
+   "calls": [
+    {
+     "name": "control_coffee_maker",
+     "arguments": {
+      "action": "brew"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "start brewing another batch of coffee",
+   "calls": [
+    {
+     "name": "control_coffee_maker",
+     "arguments": {
+      "action": "brew"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "stop the coffee maker",
+   "calls": [
+    {
+     "name": "control_coffee_maker",
+     "arguments": {
+      "action": "stop"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "keep my coffee warm",
+   "calls": [
+    {
+     "name": "control_coffee_maker",
+     "arguments": {
+      "action": "warm"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "run the dishwasher on the eco cycle",
+   "calls": [
+    {
+     "name": "start_dishwasher",
+     "arguments": {
+      "cycle": "eco"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "start a heavy dishwasher cycle",
+   "calls": [
+    {
+     "name": "start_dishwasher",
+     "arguments": {
+      "cycle": "heavy"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "run a quick cycle on the dishwasher",
+   "calls": [
+    {
+     "name": "start_dishwasher",
+     "arguments": {
+      "cycle": "quick"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "set a pasta timer for 10 minutes",
+   "calls": [
+    {
+     "name": "set_cooking_timer",
+     "arguments": {
+      "label": "pasta",
+      "minutes": 10
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "start a 90 minute timer for the brisket",
+   "calls": [
+    {
+     "name": "set_cooking_timer",
+     "arguments": {
+      "label": "brisket",
+      "minutes": 90
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "give me a 5 minute timer for the eggs",
+   "calls": [
+    {
+     "name": "set_cooking_timer",
+     "arguments": {
+      "label": "eggs",
+      "minutes": 5
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "the cookies need a 12 minute timer",
+   "calls": [
+    {
+     "name": "set_cooking_timer",
+     "arguments": {
+      "label": "cookies",
+      "minutes": 12
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "check the oven",
+   "calls": [
+    {
+     "name": "get_appliance_status",
+     "arguments": {
+      "appliance": "oven"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "check on the dishwasher",
+   "calls": [
+    {
+     "name": "get_appliance_status",
+     "arguments": {
+      "appliance": "dishwasher"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "check the coffee maker for me",
+   "calls": [
+    {
+     "name": "get_appliance_status",
+     "arguments": {
+      "appliance": "coffee_maker"
+     }
+    }
+   ],
+   "category": "positive"
+  },
+  {
+   "query": "heat up the oven for the garlic bread",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "set a cooking timer for the rice",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "start a timer for 25 minutes",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "change the coffee maker setting",
+   "calls": [],
+   "category": "missing",
+   "critical": true
+  },
+  {
+   "query": "defrost some chicken in the microwave",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "boil the kettle for tea",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "turn the fridge down to 3 degrees",
+   "calls": [],
+   "category": "irrelevant"
+  },
+  {
+   "query": "don't preheat the oven to 220 degrees tonight",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "do not run the dishwasher on heavy today",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "never brew coffee this late at night",
+   "calls": [],
+   "category": "negation",
+   "critical": true
+  },
+  {
+   "query": "get the oven up to 300 degrees",
+   "calls": [],
+   "category": "invalid",
+   "critical": true
+  },
+  {
+   "query": "set a stew timer for 500 minutes",
+   "calls": [],
+   "category": "invalid",
+   "critical": true
+  },
+  {
+   "query": "set the oven to 180 degrees and start a pizza timer for 15 minutes",
+   "calls": [
+    {
+     "name": "set_oven",
+     "arguments": {
+      "temperature": 180
+     }
+    },
+    {
+     "name": "set_cooking_timer",
+     "arguments": {
+      "label": "pizza",
+      "minutes": 15
+     }
+    }
+   ],
+   "category": "parallel"
+  },
+  {
+   "query": "brew coffee and run the dishwasher on quick",
+   "calls": [
+    {
+     "name": "control_coffee_maker",
+     "arguments": {
+      "action": "brew"
+     }
+    },
+    {
+     "name": "start_dishwasher",
+     "arguments": {
+      "cycle": "quick"
+     }
+    }
+   ],
+   "category": "parallel"
+  }
+ ]
+}
