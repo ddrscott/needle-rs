@@ -802,6 +802,7 @@ mod wasm {
 
     /// Byte-pair sums of `w * x`: bytes `0-1, 2-3, 4-5, 6-7` and `8-9, ...,
     /// 14-15`, added into `lo` and `hi`.
+    #[cfg(not(target_feature = "relaxed-simd"))]
     #[inline(always)]
     fn dot_pairs(w: v128, x: v128, lo: &mut v128, hi: &mut v128) {
         *lo = i32x4_add(*lo, i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(w, x)));
@@ -809,9 +810,76 @@ mod wasm {
     }
 
     /// Pair sums to `sdot` lanes (bytes `4i..4i+4`).
+    #[cfg(not(target_feature = "relaxed-simd"))]
     #[inline(always)]
     fn lanes(lo: v128, hi: v128) -> v128 {
         i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(lo, hi), i32x4_shuffle::<1, 3, 5, 7>(lo, hi))
+    }
+
+    /// One group's weights, expanded for [`group_lanes`].
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    type Group = [v128; 8];
+    /// One group's weights split into their positive and negative parts
+    /// (each in 0..=127, which `relaxed_dot` multiplies exactly).
+    #[cfg(target_feature = "relaxed-simd")]
+    type Group = ([v128; 8], [v128; 8]);
+
+    /// The tables [`expand_group`] reads.
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    type Tables = (v128, v128);
+    #[cfg(target_feature = "relaxed-simd")]
+    type Tables = ((v128, v128), (v128, v128));
+
+    #[inline(always)]
+    unsafe fn tables_of(tables: &[[i8; 16]; 2]) -> Tables {
+        unsafe {
+            let (t0, t1) = (load(tables[0].as_ptr().cast()), load(tables[1].as_ptr().cast()));
+            #[cfg(not(target_feature = "relaxed-simd"))]
+            return (t0, t1);
+            #[cfg(target_feature = "relaxed-simd")]
+            {
+                // Codebook values are in -127..=127, so both parts fit 7 bits.
+                let z = i8x16_splat(0);
+                let pos = |t: v128| i8x16_max(t, z);
+                let neg = |t: v128| i8x16_max(i8x16_neg(t), z);
+                ((pos(t0), pos(t1)), (neg(t0), neg(t1)))
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn expand_group(bits: u8, c: *const u8, t: &Tables) -> Group {
+        unsafe {
+            #[cfg(not(target_feature = "relaxed-simd"))]
+            return expand(bits, c, t.0, t.1);
+            #[cfg(target_feature = "relaxed-simd")]
+            return (expand(bits, c, t.0.0, t.0.1), expand(bits, c, t.1.0, t.1.1));
+        }
+    }
+
+    /// `sdot`'s four lanes of `w . x` over one group (`x` 128 bytes).
+    #[inline(always)]
+    unsafe fn group_lanes(w: &Group, x: *const u8) -> v128 {
+        unsafe {
+            #[cfg(not(target_feature = "relaxed-simd"))]
+            {
+                let (mut lo, mut hi) = (i32x4_splat(0), i32x4_splat(0));
+                for (k, wk) in w.iter().enumerate() {
+                    dot_pairs(*wk, load(x.add(16 * k)), &mut lo, &mut hi);
+                }
+                lanes(lo, hi)
+            }
+            #[cfg(target_feature = "relaxed-simd")]
+            {
+                let (mut p, mut n) = (i32x4_splat(0), i32x4_splat(0));
+                for k in 0..8 {
+                    let xv = load(x.add(16 * k));
+                    p = i32x4_relaxed_dot_i8x16_i7x16_add(xv, w.0[k], p);
+                    n = i32x4_relaxed_dot_i8x16_i7x16_add(xv, w.1[k], n);
+                }
+                i32x4_sub(p, n)
+            }
+        }
     }
 
     /// As `neon::decode`, a row at a time.
@@ -828,26 +896,20 @@ mod wasm {
         out: &mut [f32],
     ) {
         unsafe {
-            let (t0, t1) = (load(tables[0].as_ptr().cast()), load(tables[1].as_ptr().cast()));
+            let t = tables_of(tables);
             let bpg = GROUP * bits as usize / 8;
+            let fma4 = crate::infer::wsimd::fma4;
+            let sxc: Vec<f32> = (0..groups).map(|g| *sx.get_unchecked(g) * cbs).collect();
             for (r, o) in out.iter_mut().enumerate() {
-                let mut acc = [0f32; 4];
-                for g in 0..groups {
-                    let w = expand(bits, codes.as_ptr().add((r * groups + g) * bpg), t0, t1);
-                    let x = xq.as_ptr().add(g * GROUP).cast::<u8>();
-                    let (mut lo, mut hi) = (i32x4_splat(0), i32x4_splat(0));
-                    for (k, wk) in w.iter().enumerate() {
-                        dot_pairs(*wk, load(x.add(16 * k)), &mut lo, &mut hi);
-                    }
-                    let s = lanes(lo, hi);
-                    let sc = (*sx.get_unchecked(g) * cbs) * norms.get_unchecked(r * groups + g).to_f32();
-                    let sv =
-                        [i32x4_extract_lane::<0>(s), i32x4_extract_lane::<1>(s), i32x4_extract_lane::<2>(s), i32x4_extract_lane::<3>(s)];
-                    for (a, v) in acc.iter_mut().zip(sv) {
-                        *a = (v as f32).mul_add(sc, *a);
-                    }
+                let mut acc = f32x4_splat(0.0);
+                for (g, &sg) in sxc.iter().enumerate() {
+                    let w = expand_group(bits, codes.as_ptr().add((r * groups + g) * bpg), &t);
+                    let s = group_lanes(&w, xq.as_ptr().add(g * GROUP).cast());
+                    let sc = sg * norms.get_unchecked(r * groups + g).to_f32();
+                    acc = fma4(f32x4_convert_i32x4(s), f32x4_splat(sc), acc);
                 }
-                *o = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+                let a = crate::infer::wsimd::lanes(acc);
+                *o = (a[0] + a[1]) + (a[2] + a[3]);
             }
         }
     }
@@ -866,25 +928,39 @@ mod wasm {
         block: bool,
     ) -> [f32; N] {
         unsafe {
-            let (t0, t1) = (load(tables[0].as_ptr().cast()), load(tables[1].as_ptr().cast()));
+            let t = tables_of(tables);
             let bpg = GROUP * bits as usize / 8;
             let groups = norms.len();
+            let fma4 = crate::infer::wsimd::fma4;
             let mut accf = [0f32; N];
+            // With four or eight tokens, each vector lane carries one token's
+            // fma chain.
+            let mut accv = [f32x4_splat(0.0); 2];
             for g in 0..groups {
-                let w = expand(bits, codes.as_ptr().add(g * bpg), t0, t1);
+                let w = expand_group(bits, codes.as_ptr().add(g * bpg), &t);
                 let norm = norms.get_unchecked(g).to_f32();
-                for (k, af) in accf.iter_mut().enumerate() {
-                    let x = xq.as_ptr().add(k * stride + g * GROUP).cast::<u8>();
-                    let (mut lo, mut hi) = (i32x4_splat(0), i32x4_splat(0));
-                    for (j, wj) in w.iter().enumerate() {
-                        dot_pairs(*wj, load(x.add(16 * j)), &mut lo, &mut hi);
-                    }
-                    let t = i32x4_add(lo, hi);
-                    let total =
-                        i32x4_extract_lane::<0>(t) + i32x4_extract_lane::<1>(t) + i32x4_extract_lane::<2>(t) + i32x4_extract_lane::<3>(t);
+                let mut totals = [0i32; N];
+                let mut scs = [0f32; N];
+                for (k, (tk, sk)) in totals.iter_mut().zip(scs.iter_mut()).enumerate() {
+                    let t = group_lanes(&w, xq.as_ptr().add(k * stride + g * GROUP).cast());
+                    *tk = i32x4_extract_lane::<0>(t) + i32x4_extract_lane::<1>(t) + i32x4_extract_lane::<2>(t) + i32x4_extract_lane::<3>(t);
                     let s = *sx.get_unchecked(k * groups + g);
-                    let sc = if block { (norm * cbs) * s } else { norm * (cbs * s) };
-                    *af = (total as f32).mul_add(sc, *af);
+                    *sk = if block { (norm * cbs) * s } else { norm * (cbs * s) };
+                }
+                if N >= 4 {
+                    for (q, av) in accv.iter_mut().enumerate().take(N / 4) {
+                        let (t, c) = (&totals[4 * q..4 * q + 4], &scs[4 * q..4 * q + 4]);
+                        *av = fma4(f32x4(t[0] as f32, t[1] as f32, t[2] as f32, t[3] as f32), f32x4(c[0], c[1], c[2], c[3]), *av);
+                    }
+                } else {
+                    for k in 0..N {
+                        accf[k] = (totals[k] as f32).mul_add(scs[k], accf[k]);
+                    }
+                }
+            }
+            if N >= 4 {
+                for (q, av) in accv.iter().enumerate().take(N / 4) {
+                    accf[4 * q..4 * q + 4].copy_from_slice(&crate::infer::wsimd::lanes(*av));
                 }
             }
             accf

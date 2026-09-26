@@ -163,15 +163,24 @@ pub mod wsimd {
         f32x4_relaxed_madd(a, b, c)
     }
 
-    /// Whether `relaxed_madd` rounds once: a sum that sits just under an
-    /// f32 midpoint comes out right only when the product is not rounded
-    /// first.
+    /// Whether this browser's relaxed SIMD is exact for us: `relaxed_madd`
+    /// must round once (a sum that sits just under an f32 midpoint comes
+    /// out right only when the product is not rounded first), and the int8
+    /// dot must be exact for a second operand in 0..=127.
     #[cfg(target_feature = "relaxed-simd")]
     pub fn madd_is_fused() -> bool {
         let (a, b, c) = (f32::from_bits(0x3f80_0001), f32::from_bits(0x337f_fffe), f32::from_bits(0x3f80_0001));
         let got = f32x4_extract_lane::<0>(f32x4_relaxed_madd(f32x4_splat(a), f32x4_splat(b), f32x4_splat(c)));
         // `black_box` keeps the check from being folded at compile time.
-        got.to_bits() == std::hint::black_box(a).mul_add(std::hint::black_box(b), std::hint::black_box(c)).to_bits()
+        let fused = got.to_bits() == std::hint::black_box(a).mul_add(std::hint::black_box(b), std::hint::black_box(c)).to_bits();
+        // The int8 dot must be exact for a second operand in 0..=127, with
+        // lanes summing four consecutive bytes; the extremes probe it.
+        let x = std::hint::black_box(i8x16(-128, 127, -128, 127, -1, 2, -3, 4, 127, 127, 127, 127, -128, -128, -128, -128));
+        let w = std::hint::black_box(i8x16(127, 127, 127, 127, 0, 1, 2, 3, 127, 0, 64, 1, 127, 127, 127, 127));
+        let d = i32x4_relaxed_dot_i8x16_i7x16_add(x, w, i32x4_splat(1));
+        let want = [1 - 128 * 127 + 127 * 127 - 128 * 127 + 127 * 127, 1 + 2 - 6 + 12, 1 + 127 * 127 + 127 * 64 + 127, 1 - 4 * 128 * 127];
+        let dot = [i32x4_extract_lane::<0>(d), i32x4_extract_lane::<1>(d), i32x4_extract_lane::<2>(d), i32x4_extract_lane::<3>(d)] == want;
+        fused && dot
     }
 
     /// `fma(a, b, c)` on four lanes, correctly rounded.
@@ -509,6 +518,191 @@ fn axpy16(acc: &mut [f32], u: &[f16], w: f32) {
     #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     for (a, &u) in acc.iter_mut().zip(u) {
         *a = u.to_f32().mul_add(w, *a);
+    }
+}
+
+/// `o[i] = fma(a[i], s, o[i])`.
+#[inline]
+pub(crate) fn axpy(o: &mut [f32], a: &[f32], s: f32) {
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut i = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside both slices.
+    unsafe {
+        let n = o.len().min(a.len()) / 4 * 4;
+        let sv = wsimd::splat(s);
+        while i < n {
+            wsimd::store(o.as_mut_ptr().add(i), wsimd::fma4(wsimd::load(a.as_ptr().add(i)), sv, wsimd::load(o.as_ptr().add(i))));
+            i += 4;
+        }
+    }
+    for (o, &v) in o[i..].iter_mut().zip(&a[i..]) {
+        *o = v.mul_add(s, *o);
+    }
+}
+
+/// `o[i] = fma(w[i], x[i], o[i])`, the weights in f16.
+#[inline]
+pub(crate) fn fma_w16(o: &mut [f32], w: &[f16], x: &[f32]) {
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut i = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside every slice.
+    unsafe {
+        let n = o.len().min(w.len()).min(x.len()) / 4 * 4;
+        while i < n {
+            let v = wsimd::fma4(wsimd::load_f16(w.as_ptr().add(i).cast()), wsimd::load(x.as_ptr().add(i)), wsimd::load(o.as_ptr().add(i)));
+            wsimd::store(o.as_mut_ptr().add(i), v);
+            i += 4;
+        }
+    }
+    for ((o, &wv), &xv) in o[i..].iter_mut().zip(&w[i..]).zip(&x[i..]) {
+        *o = wv.to_f32().mul_add(xv, *o);
+    }
+}
+
+/// `o[i] = fma(w[i], s, o[i])`, the weights in f16.
+#[inline]
+pub(crate) fn fma_w16s(o: &mut [f32], w: &[f16], s: f32) {
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut i = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside both slices.
+    unsafe {
+        let n = o.len().min(w.len()) / 4 * 4;
+        let sv = wsimd::splat(s);
+        while i < n {
+            let v = wsimd::fma4(wsimd::load_f16(w.as_ptr().add(i).cast()), sv, wsimd::load(o.as_ptr().add(i)));
+            wsimd::store(o.as_mut_ptr().add(i), v);
+            i += 4;
+        }
+    }
+    for (o, &wv) in o[i..].iter_mut().zip(&w[i..]) {
+        *o = wv.to_f32().mul_add(s, *o);
+    }
+}
+
+/// `o[i] = fma(a[i], s, b[i])`.
+#[inline]
+pub(crate) fn fma_into(o: &mut [f32], a: &[f32], s: f32, b: &[f32]) {
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut i = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside every slice.
+    unsafe {
+        let n = o.len().min(a.len()).min(b.len()) / 4 * 4;
+        let sv = wsimd::splat(s);
+        while i < n {
+            wsimd::store(o.as_mut_ptr().add(i), wsimd::fma4(wsimd::load(a.as_ptr().add(i)), sv, wsimd::load(b.as_ptr().add(i))));
+            i += 4;
+        }
+    }
+    for ((o, &av), &bv) in o[i..].iter_mut().zip(&a[i..]).zip(&b[i..]) {
+        *o = av.mul_add(s, bv);
+    }
+}
+
+/// `out[i] = fma(t, s[i], t)` with `t = x[i] * r` (the zero-centered norm
+/// once its scale `r` is known), the norm weights in f16.
+#[inline]
+pub(crate) fn norm_apply16(out: &mut [f32], x: &[f32], r: f32, s: &[f16]) {
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut i = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside every slice.
+    unsafe {
+        let n = out.len().min(x.len()).min(s.len()) / 4 * 4;
+        let rv = wsimd::splat(r);
+        while i < n {
+            let t = std::arch::wasm32::f32x4_mul(wsimd::load(x.as_ptr().add(i)), rv);
+            wsimd::store(out.as_mut_ptr().add(i), wsimd::fma4(t, wsimd::load_f16(s.as_ptr().add(i).cast()), t));
+            i += 4;
+        }
+    }
+    for ((o, &v), &sv) in out[i..].iter_mut().zip(&x[i..]).zip(&s[i..]) {
+        let t = v * r;
+        *o = t.mul_add(sv.to_f32(), t);
+    }
+}
+
+/// RoPE on one head: `x[f] = fma(-sin, x[f + h], cos * x[f])` and
+/// `x[f + h] = fma(sin, x[f], cos * x[f + h])`, `h` half the head.
+#[inline]
+pub(crate) fn rope_rotate(x: &mut [f32], cos: &[f32], sin: &[f32]) {
+    let half = x.len() / 2;
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut f = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside each half and the tables.
+    unsafe {
+        use std::arch::wasm32::*;
+        let n = half.min(cos.len()).min(sin.len()) / 4 * 4;
+        let p = x.as_mut_ptr();
+        while f < n {
+            let (a, b) = (wsimd::load(p.add(f)), wsimd::load(p.add(f + half)));
+            let (c, sn) = (wsimd::load(cos.as_ptr().add(f)), wsimd::load(sin.as_ptr().add(f)));
+            wsimd::store(p.add(f), wsimd::fma4(f32x4_neg(sn), b, f32x4_mul(c, a)));
+            wsimd::store(p.add(f + half), wsimd::fma4(sn, a, f32x4_mul(c, b)));
+            f += 4;
+        }
+    }
+    while f < half {
+        let (a, b) = (x[f], x[f + half]);
+        x[f] = (-sin[f]).mul_add(b, cos[f] * a);
+        x[f + half] = sin[f].mul_add(a, cos[f] * b);
+        f += 1;
+    }
+}
+
+/// One engram conv tap: `o[i] = fma(taps[i], qs[(ch0 + i) / 32] * q8[i],
+/// o[i])`, the values dequantized from their int8 history (`ch0` a
+/// multiple of 4).
+#[inline]
+pub(crate) fn engram_tap(o: &mut [f32], taps: &[f32], q8: &[i8], qs: &[f32], ch0: usize) {
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut i = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside every slice; a block never
+    // crosses a 32-wide group since `ch0` is a multiple of 4.
+    unsafe {
+        use std::arch::wasm32::*;
+        let n = o.len().min(taps.len()).min(q8.len()) / 4 * 4;
+        while i < n {
+            let q = f32x4_convert_i32x4(i32x4_extend_low_i16x8(i16x8_extend_low_i8x16(v128_load32_zero(q8.as_ptr().add(i).cast()))));
+            let deq = f32x4_mul(wsimd::splat(qs[(ch0 + i) / 32]), q);
+            wsimd::store(o.as_mut_ptr().add(i), wsimd::fma4(wsimd::load(taps.as_ptr().add(i)), deq, wsimd::load(o.as_ptr().add(i))));
+            i += 4;
+        }
+    }
+    for k in i..o.len() {
+        let deq = qs[(ch0 + k) / 32] * q8[k] as f32;
+        o[k] = taps[k].mul_add(deq, o[k]);
+    }
+}
+
+/// The MLP's first epilogue over `j0..j0 + z.len()`: `z[k] =
+/// fma(t[perm[j]], cond[k] * d2[j], b2[j])`, `j = j0 + k`.
+#[inline]
+pub(crate) fn perm_fma(z: &mut [f32], t: &[f32], perm: &[usize], cond: &[f32], d2: &[f16], b2: &[f16], j0: usize) {
+    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+    let mut k = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: whole 4-element blocks inside every slice.
+    unsafe {
+        use std::arch::wasm32::*;
+        let n = z.len().min(cond.len()) / 4 * 4;
+        while k < n {
+            let j = j0 + k;
+            let g = f32x4(t[perm[j]], t[perm[j + 1]], t[perm[j + 2]], t[perm[j + 3]]);
+            let m = f32x4_mul(wsimd::load(cond.as_ptr().add(k)), wsimd::load_f16(d2.as_ptr().add(j).cast()));
+            wsimd::store(z.as_mut_ptr().add(k), wsimd::fma4(g, m, wsimd::load_f16(b2.as_ptr().add(j).cast())));
+            k += 4;
+        }
+    }
+    while k < z.len() {
+        let j = j0 + k;
+        z[k] = t[perm[j]].mul_add(cond[k] * d2[j].to_f32(), b2[j].to_f32());
+        k += 1;
     }
 }
 
@@ -1117,10 +1311,7 @@ impl Model {
                     for j in 0..ENGRAM_CONV_TAPS {
                         let Some(p) = pos.checked_sub(j * dil) else { break };
                         let (q8, qs) = (&es.v8[p * d..(p + 1) * d], &es.vs[p * d / 32..(p + 1) * d / 32]);
-                        for (ch, o) in dst.iter_mut().enumerate() {
-                            let deq = qs[ch / 32] * q8[ch] as f32;
-                            *o = taps[j * d + ch].mul_add(deq, *o);
-                        }
+                        engram_tap(dst, &taps[j * d..(j + 1) * d], q8, qs, 0);
                     }
                 });
             }
@@ -1426,9 +1617,7 @@ impl Model {
         for (k, &wk) in w.iter().enumerate() {
             axpy16(&mut cond, &lw.cond_u[k * HN..(k + 1) * HN], wk);
         }
-        for (j, zz) in z.iter_mut().enumerate() {
-            *zz = t[self.w.perm1[j]].mul_add(cond[j] * lw.d2[j].to_f32(), lw.b2[j].to_f32());
-        }
+        perm_fma(&mut z, &t, &self.w.perm1, &cond, &lw.d2, &lw.b2, 0);
         silu_native(&mut z);
         kron_native(&z, &lw.kron[2], &lw.kron[3], &mut t);
         for (j, zz) in z.iter_mut().enumerate() {
@@ -1810,7 +1999,7 @@ fn attend_head_ref(
 
 /// Runs of consecutive slots covering `keys` in order: `(first key index,
 /// first slot, length)`.
-#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+#[cfg_attr(not(any(target_arch = "aarch64", target_arch = "wasm32")), allow(dead_code))]
 fn slot_runs(keys: &Keys, attend: Option<(usize, usize)>, runs: &mut Vec<(usize, usize, usize)>) {
     runs.clear();
     let mut idx = 0;
@@ -1861,6 +2050,16 @@ fn attend_head_fast(
         unsafe { neon::attend_parts(sc, ls, qh, kvh, nkv, vd, keys, attend, nested, 0..count, &mut parts) };
         return merge_parts(&parts[..count], out);
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if fast_attention(qk, vd) {
+        let n = keys_total(keys);
+        let (count, _) = key_chunks(n, nested, nkv);
+        let mut parts = [(0f32, 0f32, [0f32; 64]); 8];
+        // SAFETY: the value cache has 16 bytes of slack past every row for
+        // the padded blocks.
+        unsafe { wattn::attend_parts(sc, ls, qh, kvh, nkv, vd, keys, attend, nested, 0..count, &mut parts) };
+        return merge_parts(&parts[..count], out);
+    }
     attend_head_ref(sc, ls, qh, kvh, nkv, qk, vd, keys, attend, nested, out)
 }
 
@@ -1873,7 +2072,9 @@ pub(crate) type Part = (f32, f32, [f32; 64]);
 fn fast_attention(qk: usize, vd: usize) -> bool {
     #[cfg(target_arch = "aarch64")]
     return qk == 48 && vd <= 64 && vd.is_multiple_of(4) && std::arch::is_aarch64_feature_detected!("dotprod");
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    return qk == 48 && vd <= 64 && vd.is_multiple_of(4);
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128"))))]
     {
         let _ = (qk, vd);
         false
@@ -1917,6 +2118,13 @@ fn attend_chunk(
         let mut part = [(0f32, 0f32, [0f32; 64])];
         // SAFETY: as in `attend_head_fast`.
         ATTN.with_borrow_mut(|sc| unsafe { neon::attend_parts(sc, ls, qh, kvh, nkv, vd, keys, attend, nested, ci..ci + 1, &mut part) });
+        return Some(part[0]);
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if fast_attention(qk, vd) {
+        let mut part = [(0f32, 0f32, [0f32; 64])];
+        // SAFETY: as in `attend_head_fast`.
+        ATTN.with_borrow_mut(|sc| unsafe { wattn::attend_parts(sc, ls, qh, kvh, nkv, vd, keys, attend, nested, ci..ci + 1, &mut part) });
         return Some(part[0]);
     }
     // Callers split heads by chunk only when `fast_attention` holds.
@@ -2308,6 +2516,210 @@ fn sinkhorn64(z: &[f32; 16]) -> [f32; 16] {
         }
     }
     e.map(|v| v as f32)
+}
+
+/// `neon::attend_parts` on WebAssembly SIMD. The integer dots only need
+/// their totals (exact in any order); every float step keeps NEON's order.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wattn {
+    use std::arch::wasm32::*;
+
+    use super::wsimd::{fma4, lanes};
+
+    #[inline(always)]
+    unsafe fn ld(p: *const i8) -> v128 {
+        unsafe { v128_load(p.cast()) }
+    }
+
+    /// `acc += x . d` for digits `d` in 0..=127: the hardware's int8 dot in
+    /// the relaxed build (exact in that range), else [`dot_add`].
+    #[inline(always)]
+    fn dot7_add(acc: v128, d: v128, x: v128) -> v128 {
+        #[cfg(target_feature = "relaxed-simd")]
+        return i32x4_relaxed_dot_i8x16_i7x16_add(x, d, acc);
+        #[cfg(not(target_feature = "relaxed-simd"))]
+        dot_add(acc, d, x)
+    }
+
+    /// `acc += w . x` as four i32 lanes whose total is the byte dot.
+    #[inline(always)]
+    fn dot_add(acc: v128, w: v128, x: v128) -> v128 {
+        let lo = i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(w, x));
+        let hi = i32x4_extadd_pairwise_i16x8(i16x8_extmul_high_i8x16(w, x));
+        i32x4_add(acc, i32x4_add(lo, hi))
+    }
+
+    #[inline(always)]
+    fn total(v: v128) -> i32 {
+        i32x4_extract_lane::<0>(v) + i32x4_extract_lane::<1>(v) + i32x4_extract_lane::<2>(v) + i32x4_extract_lane::<3>(v)
+    }
+
+    #[inline(always)]
+    fn hmax(v: v128) -> f32 {
+        let l = lanes(v);
+        l[0].max(l[1]).max(l[2].max(l[3]))
+    }
+
+    /// See [`super::attend_head_fast`].
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn attend_parts(
+        sc: &mut super::AttnScratch,
+        ls: &super::LayerState,
+        qh: &[f32],
+        kvh: usize,
+        nkv: usize,
+        vd: usize,
+        keys: &super::Keys,
+        attend: Option<(usize, usize)>,
+        nested: bool,
+        which: std::ops::Range<usize>,
+        parts: &mut [super::Part],
+    ) {
+        use super::{C21, INV_SQRT_QK, Q21, chunk_exp, quant_i8};
+        unsafe {
+            const QK: usize = 48;
+            let mut q8 = [0i8; QK];
+            let qs = quant_i8(qh, &mut q8) * INV_SQRT_QK;
+            let qp = q8.as_ptr();
+            let (q0, q1, q2) = (ld(qp), ld(qp.add(16)), ld(qp.add(32)));
+            let n = super::keys_total(keys);
+            let (_, chunk) = super::key_chunks(n, nested, nkv);
+            super::slot_runs(keys, attend, &mut sc.runs);
+            sc.s.resize(chunk + 16, 0.0);
+            sc.scale.resize(chunk + 16, 0.0);
+            sc.dots.resize(chunk + 16, 0);
+            let pad = chunk + 16 * sc.runs.len().max(1);
+            sc.digits.resize(3 * pad, 0);
+            let k8 = ls.k8.as_ptr();
+            // The query split into positive and negative parts (each in
+            // 0..=127 unless a byte is -128) for the relaxed int8 dot.
+            #[cfg(target_feature = "relaxed-simd")]
+            let split = !q8.contains(&-128);
+            #[cfg(target_feature = "relaxed-simd")]
+            let (qp3, qn3) = {
+                let z = i8x16_splat(0);
+                ([q0, q1, q2].map(|q| i8x16_max(q, z)), [q0, q1, q2].map(|q| i8x16_max(i8x16_neg(q), z)))
+            };
+            let dot = |slot: usize| {
+                let r = k8.add((slot * nkv + kvh) * QK);
+                #[cfg(target_feature = "relaxed-simd")]
+                if split {
+                    let (mut p, mut n) = (i32x4_splat(0), i32x4_splat(0));
+                    for k in 0..3 {
+                        let kv = ld(r.add(16 * k));
+                        p = i32x4_relaxed_dot_i8x16_i7x16_add(kv, qp3[k], p);
+                        n = i32x4_relaxed_dot_i8x16_i7x16_add(kv, qn3[k], n);
+                    }
+                    return total(i32x4_sub(p, n));
+                }
+                let a = dot_add(i32x4_splat(0), q0, ld(r));
+                let a = dot_add(a, q1, ld(r.add(16)));
+                total(dot_add(a, q2, ld(r.add(32))))
+            };
+            let mut crun: Vec<(usize, usize, usize)> = Vec::with_capacity(4);
+            let mut blocks: Vec<(usize, usize, usize)> = Vec::with_capacity(4);
+            for ci in which.clone() {
+                let c0 = ci * chunk;
+                if c0 >= n {
+                    break;
+                }
+                let np = ci - which.start;
+                let len = chunk.min(n - c0);
+                crun.clear();
+                for &(i0, s0, l) in &sc.runs {
+                    let (a, b) = (i0.max(c0), (i0 + l).min(c0 + len));
+                    if a < b {
+                        crun.push((a - c0, s0 + (a - i0), b - a));
+                    }
+                }
+                for &(j0, s0, l) in &crun {
+                    for i in 0..l {
+                        *sc.dots.get_unchecked_mut(j0 + i) = dot(s0 + i);
+                        *sc.scale.get_unchecked_mut(j0 + i) = *ls.ks.get_unchecked((s0 + i) * nkv + kvh);
+                    }
+                }
+                let blocked = len / 4 * 4;
+                let s = &mut sc.s[..len];
+                let qsv = f32x4_splat(qs);
+                let mut mv = f32x4_splat(f32::NEG_INFINITY);
+                let mut i = 0;
+                while i < blocked {
+                    let d = f32x4_convert_i32x4(v128_load(sc.dots.as_ptr().add(i).cast()));
+                    let v = f32x4_mul(f32x4_mul(v128_load(sc.scale.as_ptr().add(i).cast()), d), qsv);
+                    v128_store(s.as_mut_ptr().add(i).cast(), v);
+                    mv = f32x4_max(mv, v);
+                    i += 4;
+                }
+                let mut m = hmax(mv);
+                for i in blocked..len {
+                    s[i] = (sc.scale[i] * qs) * sc.dots[i] as f32;
+                    m = m.max(s[i]);
+                }
+                let sum = chunk_exp(s, m);
+                for &(j0, s0, l) in &crun {
+                    for i in 0..l {
+                        *sc.scale.get_unchecked_mut(j0 + i) = *ls.vs.get_unchecked((s0 + i) * nkv + kvh);
+                    }
+                }
+                let mut wv = f32x4_splat(0.0);
+                let mut i = 0;
+                while i + 4 <= len {
+                    let w = f32x4_mul(v128_load(s.as_ptr().add(i).cast()), v128_load(sc.scale.as_ptr().add(i).cast()));
+                    v128_store(s.as_mut_ptr().add(i).cast(), w);
+                    wv = f32x4_max(wv, w);
+                    i += 4;
+                }
+                let mut wmax = hmax(wv);
+                while i < len {
+                    s[i] *= sc.scale[i];
+                    wmax = wmax.max(s[i]);
+                    i += 1;
+                }
+                let qw = Q21 / wmax;
+                let (hi, rest) = sc.digits.split_at_mut(pad);
+                let (mid, lo) = rest.split_at_mut(pad);
+                let mut at = 0;
+                blocks.clear();
+                for &(j0, s0, l) in &crun {
+                    let padded = l.div_ceil(16) * 16;
+                    super::digits21(&s[j0..j0 + l], qw, &mut hi[at..at + l], &mut mid[at..at + l], &mut lo[at..at + l]);
+                    for v in [&mut hi[at + l..at + padded], &mut mid[at + l..at + padded], &mut lo[at + l..at + padded]] {
+                        v.fill(0);
+                    }
+                    blocks.push((at, s0, padded / 16));
+                    at += padded;
+                }
+                let cw = f32x4_splat(wmax * C21);
+                let o = &mut parts[np].2;
+                let v8t = ls.v8t.as_ptr();
+                let base = kvh * vd;
+                for dm0 in (0..vd).step_by(4) {
+                    let rows = [0, 1, 2, 3].map(|k| v8t.add((base + dm0 + k) * ls.vcap));
+                    let mut acc = [[i32x4_splat(0); 3]; 4];
+                    for &(d0, s0, nb) in &blocks {
+                        for b in 0..nb {
+                            let off = d0 + 16 * b;
+                            let (h, m, l) = (ld(hi.as_ptr().add(off)), ld(mid.as_ptr().add(off)), ld(lo.as_ptr().add(off)));
+                            for (a, r) in acc.iter_mut().zip(rows) {
+                                let v = ld(r.add(s0 + 16 * b));
+                                a[0] = dot7_add(a[0], h, v);
+                                a[1] = dot7_add(a[1], m, v);
+                                a[2] = dot7_add(a[2], l, v);
+                            }
+                        }
+                    }
+                    let sum4 = |t: usize| {
+                        f32x4(total(acc[0][t]) as f32, total(acc[1][t]) as f32, total(acc[2][t]) as f32, total(acc[3][t]) as f32)
+                    };
+                    let (sh, sm, sl) = (sum4(0), sum4(1), sum4(2));
+                    let v = f32x4_mul(fma4(sh, f32x4_splat(16384.0), fma4(sm, f32x4_splat(128.0), sl)), cw);
+                    v128_store(o.as_mut_ptr().add(dm0).cast(), v);
+                }
+                parts[np].0 = m;
+                parts[np].1 = sum;
+            }
+        }
+    }
 }
 
 #[cfg(target_arch = "aarch64")]

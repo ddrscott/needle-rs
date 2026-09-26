@@ -172,9 +172,7 @@ impl Model {
                             *o = v * hp[0];
                         }
                         for (b, &g) in hp.iter().enumerate().skip(1) {
-                            for (o, &v) in ur.iter_mut().zip(&x[b * d..(b + 1) * d]) {
-                                *o = v.mul_add(g, *o);
-                            }
+                            axpy(ur, &x[b * d..(b + 1) * d], g);
                         }
                         let xr = bx1.at(i * d..(i + 1) * d);
                         xr.copy_from_slice(ur);
@@ -186,9 +184,7 @@ impl Model {
                                 *b = k * rk;
                             }
                             let alpha = 1.0 / (lexpf((-dot16(&ea, &eb)) / (d as f32).sqrt()) + 1.0);
-                            for (o, &v) in xr.iter_mut().zip(&vals[site][i * d..(i + 1) * d]) {
-                                *o = v.mul_add(alpha, *o);
-                            }
+                            axpy(xr, &vals[site][i * d..(i + 1) * d], alpha);
                         }
                         zcn16(xr, &l16.norm_in, &mut hloc);
                         for g in 0..groups_h {
@@ -225,16 +221,8 @@ impl Model {
                             for j in 1..taps {
                                 let wj = &w[j * cw..(j + 1) * cw];
                                 match prev(j) {
-                                    Some(r) => {
-                                        for ((o, &wv), &x) in o.iter_mut().zip(wj).zip(&r[start..start + cw]) {
-                                            *o = wv.to_f32().mul_add(x, *o);
-                                        }
-                                    }
-                                    None => {
-                                        for (o, &wv) in o.iter_mut().zip(wj) {
-                                            *o = wv.to_f32().mul_add(0.0, *o);
-                                        }
-                                    }
+                                    Some(r) => fma_w16(o, wj, &r[start..start + cw]),
+                                    None => fma_w16s(o, wj, 0.0),
                                 }
                             }
                         }
@@ -243,11 +231,7 @@ impl Model {
                             let (off, scale) = if hh < nh { (hh * qk, &l16.q_norm) } else { (qd + (hh - nh) * qk, &l16.k_norm) };
                             let x = &mut out[off..off + qk];
                             zcn16_inplace(x, scale);
-                            for f in 0..half {
-                                let (a, b) = (x[f], x[f + half]);
-                                x[f] = (-sn[f]).mul_add(b, cs[f] * a);
-                                x[f + half] = sn[f].mul_add(a, cs[f] * b);
-                            }
+                            rope_rotate(x, cs, sn);
                         }
                         std::slice::from_raw_parts_mut(lr.hist.ptr().add((hrows + i) * width), width)
                             .copy_from_slice(&bproj.all()[i * lin.out..i * lin.out + width]);
@@ -297,9 +281,7 @@ impl Model {
                     let ga = 1.0 / (lexpf(-lw.attn_gate) + 1.0);
                     for i in rows.clone() {
                         zcn16(&bo.all()[i * d..(i + 1) * d], &l16.post_norm, &mut on);
-                        for ((x2, &on), &x1v) in x2.iter_mut().zip(&on).zip(&bx1.all()[i * d..(i + 1) * d]) {
-                            *x2 = on.mul_add(ga, x1v);
-                        }
+                        fma_into(&mut x2, &on, ga, &bx1.all()[i * d..(i + 1) * d]);
                         zcn16(&x2, &l16.pre_hada, &mut h2);
                         let mlp = self.mlp_native(l16, &h2);
                         let pr = &bp.all()[i * ncols..(i + 1) * ncols];
@@ -322,10 +304,7 @@ impl Model {
                                 *o = yv * hpost[a];
                             }
                             for b in 0..n {
-                                let h = hres[a * n + b];
-                                for (o, &v) in xa.iter_mut().zip(&old[b * d..(b + 1) * d]) {
-                                    *o = v.mul_add(h, *o);
-                                }
+                                axpy(xa, &old[b * d..(b + 1) * d], hres[a * n + b]);
                             }
                         }
                         if let Some(bc) = bcells {

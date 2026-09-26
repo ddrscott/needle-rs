@@ -232,13 +232,28 @@ Hugging Face repo on the first visit and keeps it in Cache Storage.
   and redoes in software the rare lane whose f64 sum sits exactly on an f32 rounding midpoint. A
   self-test (`simdSelftest`) checks both against scalar `fmaf` on 17M random inputs and a million
   constructed midpoint cases. The two builds give byte-identical envelopes on all 192 bundled cases.
+- The relaxed build also uses the hardware int8 dot (`i32x4.relaxed_dot_i8x16_i7x16_add`), which is
+  exact whenever the second operand is in 0..=127: the P.V digit planes already are, and each weight or
+  query vector splits into positive and negative parts that are (`x.w = x.w+ - x.w-`). The same runtime
+  check probes it.
 - Against the native engine, the browser build makes the same calls on 188 of the 192 cases, and
   confidence matches on the median case (90% within 0.005). The drift is the math library: Apple's
   `expf`, `exp` and `powf` aren't correctly rounded and the musl port used here rounds differently
   (musl's `expf` disagrees with Apple's on 0.9% of inputs; 4 of the 24 RoPE frequencies differ).
-- A command takes about 0.6-0.9 s in Chrome on an M3 Pro (decode about 90 tok/s, prefill about
-  140 tok/s, one thread); switching tool sets costs one read of the tools, and the page keeps an agent
-  per tool set.
+- Against Cactus Compute's own browser engine (`wasm/needle.wasm` from their Hugging Face repo, which
+  powers cactuscompute.com/needle), both loaded in the same page on an M3 Pro, the smart-home tool set
+  (639 prompt tokens, 32 queries):
+
+  | Browser | Turn, median (Cactus / ours) | Reading the tools (Cactus / ours) | Model load (Cactus / ours) |
+  | --- | --- | --- | --- |
+  | Chrome 154 | 373 / **239** ms | 2.64 / **1.65** s | 28 / 31 ms |
+  | Firefox 155 | 419 / **359** ms | 2.96 / **2.52** s | 44 / 39 ms |
+  | WebKit 26.6 (Safari) | 389 / **255** ms | 2.68 / **1.81** s | 41 / 32 ms |
+
+  On all 192 bundled cases in Node, ours makes the same calls as the native engine on 188 and is
+  byte-identical on 86; Cactus's browser engine makes the same calls on 191 and is byte-identical on 5.
+  The exact build (no relaxed SIMD, or a CPU without fma) is slower, about 0.95 s a turn.
+- Switching tool sets costs one read of the tools, and the page keeps an agent per tool set.
 
 ## // NEEDLE_VS_JEV
 
@@ -250,7 +265,7 @@ schema-valid values plus how sure it is) on the device.
 | --- | --- | --- |
 | Returns | Typed answers (Choice, Score, Noul) with probabilities and confidence | Schema-valid tool calls, a confidence, and per-option probabilities for enum arguments |
 | Runs | TypeSafe's API | The browser, the native library, the CLI |
-| Latency | 70-500 ms end to end (TypeSafe's figure) | About 25 ms a turn native on an M3 Pro, 0.6-0.9 s in the browser (measured) |
+| Latency | 70-500 ms end to end (TypeSafe's figure) | About 25 ms a turn native on an M3 Pro, about 0.25 s in the browser (measured) |
 | Price | $0.042 per million input tokens, output free | Free |
 | Weights | Closed, early access | Open (Apache-2.0); this engine is MIT |
 | Breadth | Frontier-scale judgment | 121M parameters: strong at commands to calls, weak at open-ended judgment |

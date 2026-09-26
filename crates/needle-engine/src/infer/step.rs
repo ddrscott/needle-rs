@@ -381,10 +381,9 @@ impl Model {
                         let dst = bevals.at(site * d + cols.start..site * d + cols.end);
                         for j in 0..ENGRAM_CONV_TAPS {
                             let Some(pj) = p0.checked_sub(j * dil) else { break };
-                            for (o, ch) in dst.iter_mut().zip(cols.clone()) {
-                                let deq = *vs.ptr().add(pj * groups + ch / 32) * *v8.ptr().add(pj * d + ch) as f32;
-                                *o = taps_w[j * d + ch].mul_add(deq, *o);
-                            }
+                            let q8 = std::slice::from_raw_parts(v8.ptr().add(pj * d + cols.start), cols.len());
+                            let qs = std::slice::from_raw_parts(vs.ptr().add(pj * groups), groups);
+                            engram_tap(dst, &taps_w[j * d + cols.start..j * d + cols.end], q8, qs, cols.start);
                         }
                     }
                     bar();
@@ -451,9 +450,7 @@ impl Model {
                         *o = v * hp[0];
                     }
                     for (b, &g) in hp.iter().enumerate().skip(1) {
-                        for (o, &v) in u.iter_mut().zip(&x[b * d..(b + 1) * d]) {
-                            *o = v.mul_add(g, *o);
-                        }
+                        axpy(u, &x[b * d..(b + 1) * d], g);
                     }
 
                     // (b) engram gate and (c) input norm, every member for
@@ -468,18 +465,14 @@ impl Model {
                         }
                         let (a, b) = (&*ea, &*eb);
                         let alpha = 1.0 / (lexpf((-dot16(a, b)) / (d as f32).sqrt()) + 1.0);
-                        for (o, &v) in x1.iter_mut().zip(&bevals.all()[site * d..(site + 1) * d]) {
-                            *o = v.mul_add(alpha, *o);
-                        }
+                        axpy(x1, &bevals.all()[site * d..(site + 1) * d], alpha);
                     }
                     // The input norm and its quantization, split by group
                     // (a rotation per group is real work).
                     let rh = rinv(dot16(x1, x1), d);
                     for g in share(groups_h, tid, nt) {
-                        for ch in g * GROUP..((g + 1) * GROUP).min(d) {
-                            let t = x1[ch] * rh;
-                            hloc[ch] = t.mul_add(l16.norm_in[ch].to_f32(), t);
-                        }
+                        let cols = g * GROUP..((g + 1) * GROUP).min(d);
+                        norm_apply16(&mut hloc[cols.clone()], &x1[cols.clone()], rh, &l16.norm_in[cols]);
                         ah_s.at(g..g + 1)[0] = prep_group(hloc, g, ah_q.at(g * GROUP..(g + 1) * GROUP), q.qkvg[l].act_bits());
                     }
                     bar();
@@ -516,22 +509,14 @@ impl Model {
                             let wj = &w[j * cw + cc..j * cw + cc + len];
                             if hrows >= j {
                                 let r = std::slice::from_raw_parts(hist.ptr().add((hrows - j) * width + start), len);
-                                for ((o, &wv), &x) in v.iter_mut().zip(wj).zip(r) {
-                                    *o = wv.to_f32().mul_add(x, *o);
-                                }
+                                fma_w16(v, wj, r);
                             } else {
-                                for (o, &wv) in v.iter_mut().zip(wj) {
-                                    *o = wv.to_f32().mul_add(0.0, *o);
-                                }
+                                fma_w16s(v, wj, 0.0);
                             }
                         }
                         if unit < nh + nkv {
                             zcn16_inplace(v, if unit < nh { &l16.q_norm } else { &l16.k_norm });
-                            for f in 0..half {
-                                let (a, b) = (v[f], v[f + half]);
-                                v[f] = (-sin[f]).mul_add(b, cos[f] * a);
-                                v[f + half] = sin[f].mul_add(a, cos[f] * b);
-                            }
+                            rope_rotate(v, &cos[..half], &sin[..half]);
                         }
                         if unit < nh {
                             bq.at(start..start + qk).copy_from_slice(v);
@@ -596,9 +581,7 @@ impl Model {
                     // Kronecker passes and the SiLU are split by rows.
                     let ga = 1.0 / (lexpf(-lw.attn_gate) + 1.0);
                     zcn16(bo.all(), &l16.post_norm, on);
-                    for ((x2, &on), &x1v) in x2.iter_mut().zip(on.iter()).zip(x1.iter()) {
-                        *x2 = on.mul_add(ga, x1v);
-                    }
+                    fma_into(x2, on, ga, x1);
                     zcn16(x2, &l16.pre_hada, h2);
                     // The MLP with two barriers: every member works out each
                     // stage's first pass (and the epilogues) for itself and
@@ -631,9 +614,7 @@ impl Model {
                             axpy16(c, &l16.cond_u[k * HN + jr.start..k * HN + jr.end], w);
                         }
                         let zs = bz.at(jr.clone());
-                        for ((zz, j), &cv) in zs.iter_mut().zip(jr.clone()).zip(c.iter()) {
-                            *zz = t1[self.w.perm1[j]].mul_add(cv * l16.d2[j].to_f32(), l16.b2[j].to_f32());
-                        }
+                        perm_fma(zs, t1, &self.w.perm1, c, &l16.d2, &l16.b2, jr.start);
                         silu_native(zs);
                     }
                     bar();
@@ -666,7 +647,36 @@ impl Model {
                     let hres = sinkhorn64(&zres);
                     let xp = bx.0.ptr();
                     let cols = share(d / 16, tid, nt);
-                    for ch in cols.start * 16..cols.end * 16 {
+                    #[cfg_attr(not(all(target_arch = "wasm32", target_feature = "simd128")), allow(unused_mut))]
+                    let mut ch0 = cols.start * 16;
+                    // Four channels at a time on wasm: each lane is one
+                    // channel's chain, in the same order as below.
+                    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                    {
+                        use crate::infer::wsimd::{fma4, lanes, load, load_f16, splat, store};
+                        use std::arch::wasm32::*;
+                        while ch0 < cols.end * 16 {
+                            let ch = ch0;
+                            let tv = f32x4_mul(load(t3.as_ptr().add(ch)), load_f16(l16.d4.as_ptr().add(ch).cast()));
+                            let y = f32x4_sub(f32x4_add(load(x2.as_ptr().add(ch)), tv), load(u.as_ptr().add(ch)));
+                            let old: [v128; 4] = std::array::from_fn(|b| load(xp.add(b * d + ch)));
+                            let mut sum = splat(0.0);
+                            for a in 0..n {
+                                let mut v = f32x4_mul(y, splat(hpost[a]));
+                                for (b, &ob) in old.iter().enumerate() {
+                                    v = fma4(ob, splat(hres[a * n + b]), v);
+                                }
+                                store(xp.add(a * d + ch), v);
+                                sum = if a == 0 { v } else { f32x4_add(sum, v) };
+                            }
+                            if want_cells {
+                                let c = lanes(f32x4_mul(sum, splat(0.25)));
+                                std::ptr::copy_nonoverlapping(c.as_ptr(), bcells.0.ptr().add(l * d + ch), 4);
+                            }
+                            ch0 += 4;
+                        }
+                    }
+                    for ch in ch0..cols.end * 16 {
                         let y = (x2[ch] + t3[ch] * l16.d4[ch].to_f32()) - u[ch];
                         let old: [f32; 4] = std::array::from_fn(|b| *xp.add(b * d + ch));
                         let mut sum = 0f32;
