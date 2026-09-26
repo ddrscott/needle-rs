@@ -8,4 +8,5 @@ cd "$(dirname "$0")/.."
 rm -rf site
 mkdir -p site/needle-rs
 cp -R web/. site/needle-rs/
-npx -y wrangler@latest deploy
+# The shell's CLOUDFLARE_API_TOKEN can't attach zone routes; use wrangler's own login.
+env -u CLOUDFLARE_API_TOKEN npx -y wrangler@latest deploy
