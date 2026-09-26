@@ -1,5 +1,7 @@
 # needle-rs
 
+Live at https://askscottpierce.com/needle-rs
+
 A Rust port of [Needle 3](https://github.com/cactus-compute/needle), Cactus Compute's 121M-parameter
 tool-calling model. It covers everything the Python package (`cactus-needle` 3.0.1) does: the model
 spec, inference, LoRA fine-tuning, `.cact` export, the hosted-platform client, the playground, and a
@@ -8,7 +10,7 @@ drop-in replacement for the native engine library the package ships as a binary.
 It's checked against the Python package at every layer (tokens, logits, gradients, archive bytes), and
 it's 25-180x faster than the Python code paths it replaces.
 
-**Try it in your browser: [ddrscott.github.io/needle-rs](https://ddrscott.github.io/needle-rs/).** The
+**Try it in your browser: [askscottpierce.com/needle-rs](https://askscottpierce.com/needle-rs/).** The
 same engine, compiled to WebAssembly, turns commands into typed tool calls right in the tab, with a
 probability for every choice. It's a local, free alternative to cloud "typed decision" models like
 TypeSafe's Jev for the kinds of calls a 121M model handles well (see `// NEEDLE_VS_JEV`).
@@ -217,7 +219,7 @@ part of the native engine's behavior, and the parity claims don't cover it.
 ## // IN_THE_BROWSER
 
 `crates/needle-wasm` wraps the agent for JavaScript, and `web/` is the demo page
-([live](https://ddrscott.github.io/needle-rs/)). `scripts/build-web.sh` builds it (needs `wasm-pack`);
+([live](https://askscottpierce.com/needle-rs/)). `scripts/build-web.sh` builds it (needs `wasm-pack`);
 serve `web/` with any static server. The page fetches `needle3.cact` (35 MB) from Cactus Compute's
 Hugging Face repo on the first visit and keeps it in Cache Storage.
 
@@ -275,8 +277,11 @@ judgment is Jev's pitch, not Needle's.
   whole-suite envelope comparisons, single probes, and end-to-end latency. See its README.
 - `docs/engine-rules.md` records what the native engine does around the model (decoding, confidence,
   grounding gates, repairs), the evidence for each rule, and which ones this port matches.
-- `scripts/build-web.sh` builds the browser engines into `web/pkg` and `web/pkg-relaxed`; pushing to
-  `main` publishes `web/` to GitHub Pages.
+- `scripts/build-web.sh` builds the browser engines into `web/pkg` and `web/pkg-relaxed`.
+  `scripts/deploy-asp.sh` publishes the demo to askscottpierce.com/needle-rs: an assets-only Cloudflare
+  Worker on two zone routes (`askscottpierce.com/needle-rs` and `/needle-rs/*`), with `web/` staged at
+  `site/needle-rs/` so file paths match URLs. The path is hard-coded in `wrangler.jsonc` and the deploy
+  script only; the page itself uses relative URLs.
 - `cargo clippy --all-targets` and `cargo fmt --check` are clean. The MSRV is 1.98 (NEON `sdot`).
 
 ## // LICENSE_AND_THANKS

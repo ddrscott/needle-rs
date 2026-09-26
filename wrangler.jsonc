@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // The browser demo, served as askscottpierce.com/needle-rs. Routes run ahead
+  // of whatever else serves the zone, so the main site is untouched.
+  "name": "needle-rs",
+  "compatibility_date": "2026-09-22",
+  "routes": [
+    { "pattern": "askscottpierce.com/needle-rs", "zone_name": "askscottpierce.com" },
+    { "pattern": "askscottpierce.com/needle-rs/*", "zone_name": "askscottpierce.com" }
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  // Static files only: scripts/deploy-asp.sh stages web/ under site/needle-rs/
+  // so each file's path is its URL.
+  "assets": {
+    "directory": "./site",
+    "html_handling": "auto-trailing-slash"
+  }
+}

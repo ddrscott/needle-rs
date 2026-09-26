@@ -10,3 +10,4 @@ __pycache__/
 # Built by scripts/build-web.sh (and the Pages workflow)
 /web/pkg/
 /web/pkg-relaxed/
+/site/
