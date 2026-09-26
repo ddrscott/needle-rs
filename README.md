@@ -221,7 +221,9 @@ part of the native engine's behavior, and the parity claims don't cover it.
 `crates/needle-wasm` wraps the agent for JavaScript, and `web/` is the demo page
 ([live](https://askscottpierce.com/needle-rs/)). `scripts/build-web.sh` builds it (needs `wasm-pack`);
 serve `web/` with any static server. The page fetches `needle3.cact` (35 MB) from Cactus Compute's
-Hugging Face repo on the first visit and keeps it in Cache Storage.
+Hugging Face repo on the first visit and keeps it in Cache Storage. It is pinned to revision
+`b274efcb` (the one every number here was measured with) and checked against its SHA-256; so is
+`scripts/fetch-models.sh`, so the model is Cactus's published weights, unmodified.
 
 - The int8 matmuls, attention dots, quantizer and vector exp have WebAssembly SIMD kernels that mirror
   the NEON ones exactly (`i8x16.swizzle` is the same table lookup; widening multiplies with pairwise

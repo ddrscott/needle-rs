@@ -5,8 +5,9 @@
 
 const REV = "b274efcb211a9eef48c9a88da4b43bd569696a39";
 const BASE = `https://huggingface.co/Cactus-Compute/needle3/resolve/${REV}/wasm/`;
-const MODEL_URL = "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact";
-const MODEL_CACHE = "needle-rs-model-v1";
+// The same pinned weights the page's own worker caches.
+const MODEL_URL = `https://huggingface.co/Cactus-Compute/needle3/resolve/${REV}/needle3.cact`;
+const MODEL_CACHE = "needle-rs-model-v2";
 
 let M = null;
 let out = 0;

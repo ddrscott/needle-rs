@@ -2,8 +2,12 @@
 // (then serves it from Cache Storage), picks the fastest exact build this
 // browser can run, and answers one request at a time.
 
-const MODEL_URL = "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact";
-const MODEL_CACHE = "needle-rs-model-v1";
+// Cactus Compute's published weights, pinned to the revision every number on
+// the page and in the README was measured with, and checked on download.
+const MODEL_REV = "b274efcb211a9eef48c9a88da4b43bd569696a39";
+const MODEL_URL = `https://huggingface.co/Cactus-Compute/needle3/resolve/${MODEL_REV}/needle3.cact`;
+const MODEL_SHA256 = "c9d915eca282ed42d1a09b143b592adb4cc6744ffe2d294adf5cfc5548170c38";
+const MODEL_CACHE = "needle-rs-model-v2";
 
 let needle = null;
 let queue = Promise.resolve();
@@ -25,7 +29,16 @@ async function loadEngine() {
   return { m, mode: "exact" };
 }
 
+async function sha256(bytes) {
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(d, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function fetchModel(post) {
+  // Drop copies cached under older names (the unpinned download).
+  for (const name of await caches.keys().catch(() => [])) {
+    if (name.startsWith("needle-rs-model") && name !== MODEL_CACHE) await caches.delete(name).catch(() => {});
+  }
   const cache = await caches.open(MODEL_CACHE).catch(() => null);
   const hit = cache && (await cache.match(MODEL_URL));
   if (hit) return { bytes: new Uint8Array(await hit.arrayBuffer()), cached: true };
@@ -48,6 +61,7 @@ async function fetchModel(post) {
     bytes.set(c, at);
     at += c.length;
   }
+  if ((await sha256(bytes)) !== MODEL_SHA256) throw new Error("the downloaded model does not match the pinned revision");
   if (cache) {
     await cache
       .put(MODEL_URL, new Response(bytes, { headers: { "content-type": "application/octet-stream" } }))
