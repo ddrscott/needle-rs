@@ -63,11 +63,13 @@
         </form>
         <div class="opts">
           <label><input type="checkbox" id="decide" checked> score every option</label>
-          <label>act at confidence &ge; <input type="number" id="threshold" min="0" max="1" step="0.05" value="0.7"></label>
+          <label>act at confidence &ge; <input type="number" id="threshold" min="0" max="1" step="0.05" value="0.6"></label>
         </div>
       </div>
       <div class="panel" id="right">
-        <div class="empty" id="empty">Pick an example on the left, or type your own command.</div>
+        <div class="scene-head"><span class="label">world</span><button type="button" id="scene-reset" class="link-btn">reset</button></div>
+        <div class="scene" id="scene"></div>
+        <div class="empty" id="empty">Pick an example on the left, or type your own command. Confident calls run in the world above; shaky ones get held for a bigger model.</div>
         <div id="result" hidden>
           <div class="verdict" id="verdict"></div>
           <div class="label">call</div>
@@ -83,6 +85,32 @@
     </div>
     <div class="label">history</div>
     <ol class="history" id="history"></ol>
+  </section>
+
+  <section>
+    <h2><span class="slashes">//</span> RACE</h2>
+    <p>
+      Cactus Compute ships its own browser engine for Needle 3, the one behind
+      <a href="https://cactuscompute.com/needle">cactuscompute.com/needle</a>. Race it against needle-rs, right here, in
+      your browser: the same model, the same tools, the same commands, one after the other on the same thread.
+    </p>
+    <div class="race-controls">
+      <button type="button" id="race-go" class="go" disabled>race on the <span id="race-set">game</span> commands</button>
+      <span class="race-note" id="race-note">Loads Cactus's engine (0.7 MB) from their Hugging Face repo the first time.</span>
+    </div>
+    <div class="race" id="race" hidden>
+      <div class="lane" id="lane-ours">
+        <div class="lane-head"><span class="who">needle-rs</span><span class="stat" id="stat-ours"></span></div>
+        <div class="lane-bar"><div class="lane-fill" id="fill-ours"></div></div>
+        <div class="chips-row" id="chips-ours"></div>
+      </div>
+      <div class="lane" id="lane-cactus">
+        <div class="lane-head"><span class="who">cactus needle.wasm</span><span class="stat" id="stat-cactus"></span></div>
+        <div class="lane-bar"><div class="lane-fill" id="fill-cactus"></div></div>
+        <div class="chips-row" id="chips-cactus"></div>
+      </div>
+      <div class="race-verdict" id="race-verdict"></div>
+    </div>
   </section>
 
   <section>
@@ -113,7 +141,7 @@
     </p>
 <pre class="code"><span class="c">// Needle first; escalate only when it isn't sure.</span>
 const r = JSON.parse(needle.decide(text, 256));
-if (r.function_calls.length &amp;&amp; r.confidence &gt;= 0.7) {
+if (r.function_calls.length &amp;&amp; r.confidence &gt;= 0.6) {
   act(r.function_calls);   <span class="c">// local, free, private</span>
 } else {
   escalate(text);          <span class="c">// Jev, an LLM, or a person</span>

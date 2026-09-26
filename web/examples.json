@@ -110,10 +110,10 @@
    }
   ],
   "queries": [
+   "light my torch so I can see",
    "take two steps east",
    "hit the goblin with my sword",
    "drink a health potion, I'm almost dead",
-   "light a torch, it's dark in here",
    "shoot the skeleton with an arrow",
    "tell the innkeeper we need a room for the night"
   ]
@@ -223,9 +223,9 @@
   ],
   "queries": [
    "grab the red cup",
-   "pick up the blue bottle",
    "drop it in the left bin",
-   "slow down a bit",
+   "pick up the blue bottle",
+   "put it in the right bin",
    "switch to fast mode",
    "stop! someone just walked into the cell"
   ]

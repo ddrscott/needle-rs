@@ -236,10 +236,12 @@ Hugging Face repo on the first visit and keeps it in Cache Storage.
   exact whenever the second operand is in 0..=127: the P.V digit planes already are, and each weight or
   query vector splits into positive and negative parts that are (`x.w = x.w+ - x.w-`). The same runtime
   check probes it.
-- Against the native engine, the browser build makes the same calls on 188 of the 192 cases, and
-  confidence matches on the median case (90% within 0.005). The drift is the math library: Apple's
-  `expf`, `exp` and `powf` aren't correctly rounded and the musl port used here rounds differently
-  (musl's `expf` disagrees with Apple's on 0.9% of inputs; 4 of the 24 RoPE frequencies differ).
+- Against the native engine, the browser build makes the same calls on 190 of the 192 cases and is
+  byte-identical on 100. The drift is the math library: Apple's `expf`, `exp` and `powf` aren't
+  correctly rounded, and nothing else rounds exactly like them. Off Apple, `expf`, `powf` and
+  `sincosf` are computed in f64 and rounded once, which agrees with Apple far more often than musl's
+  f32 versions (`expf` differs on 0.09% of inputs instead of 0.9%) and took the browser from 188 to 190
+  matching calls and from 86 to 100 identical envelopes.
 - Against Cactus Compute's own browser engine (`wasm/needle.wasm` from their Hugging Face repo, which
   powers cactuscompute.com/needle), both loaded in the same page on an M3 Pro, the smart-home tool set
   (639 prompt tokens, 32 queries):
@@ -250,10 +252,15 @@ Hugging Face repo on the first visit and keeps it in Cache Storage.
   | Firefox 155 | 419 / **359** ms | 2.96 / **2.52** s | 44 / 39 ms |
   | WebKit 26.6 (Safari) | 389 / **255** ms | 2.68 / **1.81** s | 41 / 32 ms |
 
-  On all 192 bundled cases in Node, ours makes the same calls as the native engine on 188 and is
-  byte-identical on 86; Cactus's browser engine makes the same calls on 191 and is byte-identical on 5.
+  On all 192 bundled cases in Node, ours makes the same calls as the native engine on 190 and is
+  byte-identical on 100; Cactus's browser engine makes the same calls on 191 and is byte-identical on 5.
+  The demo page runs this race live in the visitor's browser (`web/race-worker.js` loads Cactus's
+  engine from their Hugging Face repo, pinned to the benchmarked revision).
   The exact build (no relaxed SIMD, or a CPU without fma) is slower, about 0.95 s a turn.
 - Switching tool sets costs one read of the tools, and the page keeps an agent per tool set.
+- Each example drives a small world (`web/scenes.js`): a dungeon, a pick-and-place cell, a car
+  dashboard, a ledger. Calls at or above the confidence threshold (default 0.6) run in it; the rest,
+  and anything the engine's grounding check withholds, are shown held for a bigger model.
 
 ## // NEEDLE_VS_JEV
 

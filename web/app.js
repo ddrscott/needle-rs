@@ -1,5 +1,8 @@
-// The page: example tabs, the command box, and rendering what the engine
-// returns. The engine itself runs in worker.js.
+// The page: example tabs, the command box, the scenes the calls act on,
+// and the race against Cactus's engine. needle-rs runs in worker.js, Cactus's
+// engine in race-worker.js.
+
+import { sceneFor } from "./scenes.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -90,8 +93,17 @@ function customTools() {
   }
 }
 
+const scenes = new Map();
+
+function sceneOf(id) {
+  if (!scenes.has(id)) scenes.set(id, sceneFor(id));
+  return scenes.get(id);
+}
+
 function select(ex) {
   current = ex;
+  sceneOf(ex.id).mount($("scene"));
+  $("race-set").textContent = ex.id === "custom" ? "custom" : ex.title.toLowerCase();
   for (const b of $("tabs").children) b.setAttribute("aria-selected", String(b.dataset.id === ex.id));
   $("blurb").textContent = ex.blurb;
   $("custom").hidden = ex.id !== "custom";
@@ -199,6 +211,10 @@ function render(input, r) {
     v.textContent = "NO CALL";
   }
 
+  const scene = sceneOf(current.id);
+  if (act) for (const c of calls) scene.note(scene.apply(c));
+  else for (const c of calls.length ? calls : withheld) scene.hold(c);
+
   const shown = calls.length ? calls : withheld;
   $("call").replaceChildren(jsonView(shown.length === 1 ? shown[0] : shown));
 
@@ -244,6 +260,110 @@ function render(input, r) {
   $("history").prepend(li);
 }
 
+// // RACE
+
+let cactus = null;
+let raceId = 0;
+
+function cactusCall(msg) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    const onMsg = (e) => {
+      if (e.data.id !== id) return;
+      cactus.removeEventListener("message", onMsg);
+      e.data.type === "error" ? reject(new Error(e.data.message)) : resolve(e.data);
+    };
+    cactus.addEventListener("message", onMsg);
+    cactus.postMessage({ id, ...msg });
+  });
+}
+
+const median = (a) => {
+  const b = [...a].sort((x, y) => x - y);
+  return b.length ? (b.length % 2 ? b[b.length >> 1] : (b[b.length / 2 - 1] + b[b.length / 2]) / 2) : 0;
+};
+
+async function race() {
+  if (busy || !engineReady) return;
+  let tools = current.tools;
+  let system = current.system || "";
+  let queries = current.queries;
+  if (current.id === "custom") {
+    const c = customTools();
+    if (c.error) return status(`custom tools: ${c.error}`, true);
+    tools = c.tools;
+    system = $("custom-system").value;
+    queries = [$("input").value.trim()].filter(Boolean);
+    if (!queries.length) return status("type a command to race on", true);
+  }
+  busy = true;
+  $("race-go").disabled = true;
+  $("run").disabled = true;
+  $("race").hidden = false;
+  const lanes = { ours: { turns: [], calls: [] }, cactus: { turns: [], calls: [] } };
+  for (const who of ["ours", "cactus"]) {
+    $(`chips-${who}`).replaceChildren();
+    $(`fill-${who}`).style.width = "0";
+    $(`stat-${who}`).textContent = "";
+  }
+  $("race-verdict").replaceChildren();
+  try {
+    if (!cactus) {
+      $("race-note").textContent = "loading Cactus's engine from Hugging Face";
+      cactus = new Worker(new URL("./race-worker.js", import.meta.url));
+      await cactusCall({ type: "load" });
+    }
+    $("race-note").textContent = "racing: each command goes to both engines, alternating which goes first";
+    const toolsJson = JSON.stringify(tools);
+    // Both read the tools fresh (a new agent on our side).
+    const key = `race:${++raceId}`;
+    const [ourInit, theirInit] = [await call({ type: "run", key, system, tools: toolsJson, input: queries[0], decide: false, maxTokens: 512 }), await cactusCall({ type: "init", system, tools: toolsJson })];
+    lanes.ours.initMs = ourInit.prefixMs;
+    lanes.cactus.initMs = theirInit.prefixMs;
+    const total = { ours: 0, cactus: 0 };
+    const scale = () => Math.max(total.ours, total.cactus, 1);
+    const draw = () => {
+      for (const who of ["ours", "cactus"]) {
+        const l = lanes[who];
+        $(`fill-${who}`).style.width = `${(100 * total[who]) / scale()}%`;
+        $(`stat-${who}`).textContent = `tools ${Math.round(l.initMs)} ms · median ${Math.round(median(l.turns))} ms · total ${(total[who] / 1000).toFixed(2)} s`;
+      }
+    };
+    const key2 = (c) => JSON.stringify(c.function_calls || []);
+    for (let i = 0; i < queries.length; i++) {
+      const order = i % 2 ? ["cactus", "ours"] : ["ours", "cactus"];
+      for (const who of order) {
+        const r = who === "ours"
+          ? await call({ type: "run", key, system, tools: toolsJson, input: queries[i], decide: false, maxTokens: 512 })
+          : await cactusCall({ type: "run", input: queries[i] });
+        lanes[who].turns.push(r.turnMs);
+        lanes[who].calls.push(key2(r.envelope));
+        total[who] += r.turnMs;
+      }
+      const same = lanes.ours.calls[i] === lanes.cactus.calls[i];
+      for (const who of ["ours", "cactus"]) {
+        const chip = el("span", same ? "" : "diff", `${Math.round(lanes[who].turns[i])} ms`);
+        chip.title = `${queries[i]}\n${lanes[who].calls[i]}`;
+        $(`chips-${who}`).append(chip);
+      }
+      draw();
+    }
+    const a = median(lanes.ours.turns), b = median(lanes.cactus.turns);
+    const same = lanes.ours.calls.filter((c, i) => c === lanes.cactus.calls[i]).length;
+    const v = $("race-verdict");
+    if (a < b) v.append(el("span", "win", `needle-rs is ${(b / a).toFixed(2)}× faster per command`), ` in this browser (median ${Math.round(a)} vs ${Math.round(b)} ms).`);
+    else v.append(`Cactus's engine won this one: median ${Math.round(b)} vs ${Math.round(a)} ms.`);
+    v.append(el("div", "race-note", `Same calls on ${same} of ${queries.length} commands (differences outlined). Reading the tools: ${Math.round(lanes.ours.initMs)} vs ${Math.round(lanes.cactus.initMs)} ms.`));
+    $("race-note").textContent = "Run it again, or pick another example above and race that.";
+  } catch (e) {
+    $("race-note").textContent = `race failed: ${e.message}`;
+  } finally {
+    busy = false;
+    $("race-go").disabled = false;
+    $("run").disabled = false;
+  }
+}
+
 // // START
 
 let engineMode = "";
@@ -253,6 +373,8 @@ async function start() {
   $("custom-tools").value = JSON.stringify(examples[0].tools, null, 2);
   buildTabs();
   select(examples[0]);
+  $("scene-reset").onclick = () => sceneOf(current.id).reset();
+  $("race-go").onclick = race;
   $("ask").onsubmit = (e) => {
     e.preventDefault();
     run();
@@ -264,6 +386,7 @@ async function start() {
     $("meter").hidden = true;
     engineReady = true;
     $("run").disabled = false;
+    $("race-go").disabled = false;
     const src = r.cached ? "from cache" : `${(r.bytes / 1e6).toFixed(1)} MB downloaded`;
     status(`ready: model ${src}, loaded in ${Math.round(r.loadMs)} ms, ${engineMode}. Pick a command.`, true);
   } catch (e) {
